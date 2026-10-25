@@ -5,10 +5,11 @@ package domain
 //
 // The rules, in order: not excluded by config; reachable; not draining;
 // breaker closed; not throttled, nor busy for a heavy request; time-travel
-// history when the request needs it; synced (within tolerance of best)
-// unless the class is local-only or the request is for a specific round the
-// node holds; the round is in the window the class needs (block or account
-// state), and every round a simulation lists has been reached; developer API
+// history when the request needs it, and the asset holders index, not known
+// to be missing; synced (within tolerance of best) unless the class is
+// local-only or the request is for a specific round the node holds; the
+// round is in the window the class needs (block or account state), and
+// every round a simulation lists has been reached; developer API
 // when needed; the simulate limits and options the request needs; no
 // broadcast to followers.
 func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
@@ -22,6 +23,9 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 		return false
 	}
 	if c.TimeTravel && !u.Caps.TimeTravel {
+		return false
+	}
+	if c.Holders && (!u.Caps.HoldersIndex || u.Stats.HoldersMissing) {
 		return false
 	}
 	if c.Round != nil {

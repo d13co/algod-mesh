@@ -71,6 +71,9 @@ type RequestClass struct {
 	// Deltas marks GET /v2/deltas/{round}, which a time-travel node
 	// re-evaluates from its history for a round past its lookback.
 	Deltas bool
+	// Holders marks GET /v2/assets/{asset-id}/holders, an asset's holders
+	// at a round, which only a node with TimeTravelHoldersIndex answers.
+	Holders bool
 }
 
 // Heavy reports whether the request can keep a node busy for long: a
@@ -239,6 +242,9 @@ func (c RequestClass) String() string {
 	if c.Deltas {
 		parts = append(parts, "deltas")
 	}
+	if c.Holders {
+		parts = append(parts, "holders")
+	}
 	if c.Round != nil {
 		switch c.RoundWindow {
 		case WindowState:
@@ -390,6 +396,19 @@ func Classify(method, path, rawQuery string) RequestClass {
 		case seg(1) == "applications" && seg(3) == "boxes":
 			// Stock algod takes round on a box listing, within its
 			// account-state lookback; a time-travel node serves any round.
+			if ok {
+				c.Round = &r
+				c.RoundWindow = WindowState
+				c.HistoryAnyRound = true
+			}
+		case seg(1) == "assets" && seg(3) == "holders" && len(segs) == 4:
+			// dtalgorand's holders index: its own route, GET only, at any
+			// round of the history, the latest without one. Other methods
+			// have no route anywhere: any node answers 405.
+			if method != "GET" {
+				break
+			}
+			c.Holders, c.TimeTravel = true, true
 			if ok {
 				c.Round = &r
 				c.RoundWindow = WindowState

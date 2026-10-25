@@ -40,6 +40,7 @@ type upstreamStats struct {
 	openUntil      time.Time
 	throttledUntil time.Time
 	busyUntil      time.Time
+	holdersUntil   time.Time // holders index missing or stale until then
 }
 
 // NewStatsBook creates an empty book.
@@ -117,6 +118,16 @@ func (b *StatsBook) Busy(id string, d time.Duration) {
 	}
 }
 
+// HoldersMissing marks an upstream whose asset holders index is missing or
+// stale, as its 503 to a holders page says, for d. It is not a failure.
+func (b *StatsBook) HoldersMissing(id string, d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if until := b.clock.Now().Add(d); until.After(b.get(id).holdersUntil) {
+		b.get(id).holdersUntil = until
+	}
+}
+
 // Snapshot returns the current stats for an upstream.
 func (b *StatsBook) Snapshot(id string) domain.Stats {
 	b.mu.Lock()
@@ -142,7 +153,7 @@ func (b *StatsBook) Snapshot(id string) domain.Stats {
 	}
 	st := domain.Stats{LatencyMS: lat, Inflight: s.inflight,
 		BreakerOpen: now.Before(s.openUntil), Throttled: now.Before(s.throttledUntil),
-		Busy: now.Before(s.busyUntil)}
+		Busy: now.Before(s.busyUntil), HoldersMissing: now.Before(s.holdersUntil)}
 	if n > 0 {
 		st.ErrorRate = float64(fails) / float64(n)
 	}

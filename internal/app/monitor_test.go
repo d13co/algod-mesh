@@ -11,6 +11,7 @@ import (
 	"github.com/d13co/algod-mesh/internal/adapters/metrics"
 	"github.com/d13co/algod-mesh/internal/domain"
 	"github.com/d13co/algod-mesh/internal/fakealgod"
+	"github.com/d13co/algod-mesh/internal/ports"
 )
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
@@ -107,6 +108,19 @@ func TestMonitorDetectsTimeTravel(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return m.State().LastRound == 5001 })
 	if !m.State().Caps.TimeTravel {
 		t.Fatal("time travel dropped on round update")
+	}
+}
+
+// TimeTravelHoldersIndex is a capability only with EnableTimeTravel, which
+// dtalgorand needs for it.
+func TestCapsHoldersIndex(t *testing.T) {
+	for _, tc := range []struct{ tt, holders, want bool }{
+		{false, false, false}, {false, true, false}, {true, false, false}, {true, true, true},
+	} {
+		c := capsFromConfig(ports.NodeConfig{EnableTimeTravel: tc.tt, TimeTravelHoldersIndex: tc.holders}, domain.Capabilities{}, 100, nil)
+		if c.HoldersIndex != tc.want {
+			t.Errorf("time travel %v, holders index %v: got %v", tc.tt, tc.holders, c.HoldersIndex)
+		}
 	}
 }
 

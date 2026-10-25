@@ -232,6 +232,7 @@ func checkNodeCmd(args []string) error {
 		"archival": nc.Archival, "max_block_history_lookback": nc.MaxBlockHistoryLookback,
 		"developer_api": nc.EnableDeveloperAPI, "follow_mode": nc.EnableFollowMode,
 		"experimental_api": nc.EnableExperimentalAPI, "time_travel": nc.EnableTimeTravel,
+		"holders_index":  nc.EnableTimeTravel && nc.TimeTravelHoldersIndex,
 		"storage_engine": nc.StorageEngine}
 	var arch domain.Archival
 	switch {

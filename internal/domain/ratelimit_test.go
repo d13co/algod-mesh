@@ -89,6 +89,8 @@ func TestCostBase(t *testing.T) {
 		{"block", Classify("GET", "/v2/blocks/990", ""), "round", 1},
 		{"account at a round", Classify("GET", "/v2/accounts/A", "round=5"), "timetravel", 2},
 		{"versions", Classify("GET", "/v2/accounts/A/versions", ""), CostVersions, 10},
+		{"holders", Classify("GET", "/v2/assets/7/holders", ""), CostHolders, 10},
+		{"holders at a round", Classify("GET", "/v2/assets/7/holders", "round=5"), CostHolders, 10},
 		{"recent delta", Classify("GET", "/v2/deltas/995", ""), "round", 1},
 		{"old delta", Classify("GET", "/v2/deltas/500", ""), CostDeltasHistory, 50},
 		{"one group", sim(SimulateBody{TxnGroups: groups(1)}), "simulate", 5},

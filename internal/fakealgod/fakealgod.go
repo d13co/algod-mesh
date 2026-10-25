@@ -63,6 +63,7 @@ type Node struct {
 	simRetryAfter int
 	simCancelled  int
 	pathStatus    map[string]int    // requests for these paths answer this status
+	pathRetry     map[string]int    // ... with this Retry-After, in seconds
 	effort        map[string]string // answers for these paths carry this X-Algod-Effort
 	boxes         map[uint64]map[string][]byte
 	pool          map[string]poolTxn
@@ -166,6 +167,17 @@ func (n *Node) SetPathStatus(path string, status int) {
 	n.pathStatus[path] = status
 }
 
+// SetPathRetryAfter makes the answers SetPathStatus sets for path carry
+// Retry-After: seconds; 0 removes it.
+func (n *Node) SetPathRetryAfter(path string, seconds int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.pathRetry == nil {
+		n.pathRetry = map[string]int{}
+	}
+	n.pathRetry[path] = seconds
+}
+
 // SetEffort makes answers for path carry value as their X-Algod-Effort, as
 // dtalgorand's EnableEffortHeader does; "" removes it. A busy answer from
 // SetSimulate carries none, as on dtalgorand.
@@ -257,12 +269,15 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimSuffix(r.URL.Path, "/")
 	n.mu.Lock()
-	status, effort := n.pathStatus[p], n.effort[p]
+	status, effort, retry := n.pathStatus[p], n.effort[p], n.pathRetry[p]
 	n.mu.Unlock()
 	if effort != "" {
 		w.Header().Set("X-Algod-Effort", effort)
 	}
 	if status != 0 {
+		if retry > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+		}
 		writeJSON(w, status, map[string]string{"message": fmt.Sprintf("fake node answers %d", status)})
 		return
 	}
@@ -499,6 +514,7 @@ type ConfigReader struct {
 	DeveloperAPI bool
 	FollowMode   bool
 	TimeTravel   bool
+	HoldersIndex bool // TimeTravelHoldersIndex
 }
 
 // Read implements ports.NodeConfigReader.
@@ -506,5 +522,5 @@ func (c ConfigReader) Read() (ports.NodeConfig, error) {
 	tt := c.TimeTravel || c.Node.opts.TimeTravel
 	return ports.NodeConfig{Endpoint: c.Node.URL(), NetAddr: strings.TrimPrefix(c.Node.URL(), "http://"), Token: c.Node.Token(), GenesisID: c.Node.opts.GenesisID,
 		Archival: c.Archival, MaxBlockHistoryLookback: c.Lookback, EnableDeveloperAPI: c.DeveloperAPI,
-		EnableFollowMode: c.FollowMode, EnableTimeTravel: tt, MaxAcctLookback: 4, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
+		EnableFollowMode: c.FollowMode, EnableTimeTravel: tt, TimeTravelHoldersIndex: c.HoldersIndex, MaxAcctLookback: 4, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
 }

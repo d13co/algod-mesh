@@ -436,7 +436,7 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	defer cancel()
 	release := r.stats.Begin(u.ID)
 	target := ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry}
-	timeLimited := class.Simulate || class.Deltas || class.Versions
+	timeLimited := class.Simulate || class.Deltas || class.Versions || class.Holders
 	if timeLimited {
 		target.PassStatus = timeLimitPass
 	}
@@ -455,6 +455,17 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		// for a while, and the rest as before.
 		r.stats.Busy(u.ID, min(out.RetryAfter, maxBusy))
 		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
+	case class.Holders && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
+		// dtalgorand is overloaded: the page goes to another node, and
+		// nothing is held against this one. Not marked busy, which would
+		// keep simulations and deltas off it for a holders page.
+		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
+	case holdersMissing(class, out):
+		// The node's holders index is missing or stale: only ttimport, with
+		// the node stopped, builds it. Its other answers are unaffected.
+		r.stats.HoldersMissing(u.ID, holdersMissingFor)
+		r.metric.Inc("mesh_upstream_holders_missing", "upstream", u.ID)
+		r.log.Warn("upstream has no usable asset holders index", "upstream", u.ID)
 	default:
 		r.stats.Record(u.ID, class.StatKey(), out)
 	}
@@ -493,6 +504,19 @@ func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(int, http.Heade
 // only run it as long.
 var timeLimitPass = map[int]bool{http.StatusGatewayTimeout: true}
 
+// holdersMissing reports dtalgorand's answer to a holders page while its
+// index is missing or stale: a 503 without Retry-After (a busy node sends
+// one).
+func holdersMissing(class domain.RequestClass, out ports.Outcome) bool {
+	return class.Holders && out.Status == http.StatusServiceUnavailable && out.RetryAfter == 0
+}
+
+// holdersMissingFor is how long a node whose holders index is missing is
+// passed over for holders pages. The index stays missing until the node is
+// stopped and ttimport builds it, so this only bounds how soon a rebuilt
+// node is tried again.
+const holdersMissingFor = time.Minute
+
 // maxBusy bounds how long a busy node is passed over for heavy requests,
 // whatever its Retry-After says.
 const maxBusy = 10 * time.Second
@@ -501,8 +525,8 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	r.metric.Inc("mesh_requests_unroutable", "class", class.StatKey())
 	summary := make([]string, 0, len(cands))
 	for _, u := range cands {
-		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v tt=%v breaker=%v draining=%v)", u.ID, u.Health,
-			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Caps.TimeTravel, u.Stats.BreakerOpen, u.Draining))
+		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v tt=%v holders=%v breaker=%v draining=%v)", u.ID, u.Health,
+			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Caps.TimeTravel, u.Caps.HoldersIndex, u.Stats.BreakerOpen, u.Draining))
 	}
 	r.log.Warn("no eligible upstream", "class", class.String(), "best", best, "candidates", strings.Join(summary, " "))
 	if class.LocalOnly && r.opts.Balancer {
@@ -512,6 +536,16 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	if class.TimeTravel && !anyTimeTravel(cands) {
 		writeMessage(w, 503, "algod-mesh: this request needs a time-travel node and the fleet has none")
 		return
+	}
+	if class.Holders {
+		switch {
+		case !anyCaps(cands, func(c domain.Capabilities) bool { return c.HoldersIndex }):
+			writeMessage(w, 503, "algod-mesh: this request needs a node with TimeTravelHoldersIndex and the fleet has none")
+			return
+		case allHoldersMissing(cands):
+			writeMessage(w, 503, holdersMissingMessage)
+			return
+		}
 	}
 	if class.Heavy() && anyBusy(cands) {
 		w.Header().Set("Retry-After", "1")
@@ -546,13 +580,40 @@ func anyBusy(us []domain.Upstream) bool {
 // anyTimeTravel reports whether any candidate that is not excluded
 // advertises the history.
 func anyTimeTravel(us []domain.Upstream) bool {
+	return anyCaps(us, func(c domain.Capabilities) bool { return c.TimeTravel })
+}
+
+// anyCaps reports whether any candidate that is not excluded has
+// capabilities that satisfy has.
+func anyCaps(us []domain.Upstream, has func(domain.Capabilities) bool) bool {
 	for _, u := range us {
-		if u.Caps.TimeTravel && !u.Excluded {
+		if has(u.Caps) && !u.Excluded {
 			return true
 		}
 	}
 	return false
 }
+
+// allHoldersMissing reports whether every candidate that is not excluded
+// and enables the holders index is passed over because its index is missing,
+// and there is at least one.
+func allHoldersMissing(us []domain.Upstream) bool {
+	n := 0
+	for _, u := range us {
+		if !u.Caps.HoldersIndex || u.Excluded {
+			continue
+		}
+		if !u.Stats.HoldersMissing {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// holdersMissingMessage answers a holders page when every node with the
+// option has said its index is missing or stale.
+const holdersMissingMessage = "algod-mesh: the asset holders index is missing or stale on every node that enables it: stop the node and build it with ttimport -holders-index"
 
 func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	sel, cands, best, ok := r.pick(ctx, class, cands, best)
@@ -743,9 +804,17 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 		return
 	case out.Err != nil && errors.Is(out.Err, context.DeadlineExceeded):
 		writeMessage(w, 504, "algod-mesh: upstream timeout")
-	case class.Heavy() && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
+	case (class.Heavy() || class.Holders) && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(out.RetryAfter), 10))
 		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
+	case holdersMissing(class, out):
+		// The last node tried is missing its index. Say "every node" only
+		// when that is so: with a retry budget, some may not have been tried.
+		if cands, _ := r.dir.Snapshot(); allHoldersMissing(cands) {
+			writeMessage(w, 503, holdersMissingMessage)
+		} else {
+			writeMessage(w, 503, "algod-mesh: the asset holders index is missing or stale on the nodes tried")
+		}
 	case out.Status >= 500 || out.Status == 429:
 		writeMessage(w, 502, fmt.Sprintf("algod-mesh: upstream answered %d", out.Status))
 	default:

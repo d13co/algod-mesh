@@ -41,6 +41,7 @@ type configFile struct {
 	EnableFollowMode        bool   `json:"EnableFollowMode"`
 	EnableExperimentalAPI   bool   `json:"EnableExperimentalAPI"`
 	EnableTimeTravel        bool   `json:"EnableTimeTravel"`
+	TimeTravelHoldersIndex  bool   `json:"TimeTravelHoldersIndex"`
 	MaxAcctLookback         uint64 `json:"MaxAcctLookback"`
 	StorageEngine           string `json:"StorageEngine"`
 	RestWriteTimeoutSeconds int    `json:"RestWriteTimeoutSeconds"`
@@ -96,6 +97,7 @@ func (r Reader) Read() (ports.NodeConfig, error) {
 	nc.EnableFollowMode = cf.EnableFollowMode
 	nc.EnableExperimentalAPI = cf.EnableExperimentalAPI
 	nc.EnableTimeTravel = cf.EnableTimeTravel
+	nc.TimeTravelHoldersIndex = cf.TimeTravelHoldersIndex
 	nc.MaxAcctLookback = cf.MaxAcctLookback
 	nc.StorageEngine = cf.StorageEngine
 	nc.RestWriteTimeoutSeconds = cf.RestWriteTimeoutSeconds
