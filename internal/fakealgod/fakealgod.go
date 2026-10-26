@@ -31,6 +31,7 @@ type Options struct {
 	DeveloperAPI bool
 	FollowMode   bool
 	TimeTravel   bool
+	HoldersIndex bool // TimeTravelHoldersIndex, for ConfigReader
 	Version      string
 	// Simulate makes the node a dtalgorand that reports these limits at
 	// GET /v2/transactions/simulate/limits; nil is a stock algod (404).
@@ -64,6 +65,7 @@ type Node struct {
 	simCancelled  int
 	pathStatus    map[string]int    // requests for these paths answer this status
 	pathRetry     map[string]int    // ... with this Retry-After, in seconds
+	pathMessage   map[string]string // ... and this message
 	effort        map[string]string // answers for these paths carry this X-Algod-Effort
 	boxes         map[uint64]map[string][]byte
 	pool          map[string]poolTxn
@@ -178,6 +180,17 @@ func (n *Node) SetPathRetryAfter(path string, seconds int) {
 	n.pathRetry[path] = seconds
 }
 
+// SetPathMessage makes the answers SetPathStatus sets for path carry msg
+// as their message; "" restores the default.
+func (n *Node) SetPathMessage(path, msg string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.pathMessage == nil {
+		n.pathMessage = map[string]string{}
+	}
+	n.pathMessage[path] = msg
+}
+
 // SetEffort makes answers for path carry value as their X-Algod-Effort, as
 // dtalgorand's EnableEffortHeader does; "" removes it. A busy answer from
 // SetSimulate carries none, as on dtalgorand.
@@ -269,7 +282,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimSuffix(r.URL.Path, "/")
 	n.mu.Lock()
-	status, effort, retry := n.pathStatus[p], n.effort[p], n.pathRetry[p]
+	status, effort, retry, msg := n.pathStatus[p], n.effort[p], n.pathRetry[p], n.pathMessage[p]
 	n.mu.Unlock()
 	if effort != "" {
 		w.Header().Set("X-Algod-Effort", effort)
@@ -278,7 +291,10 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		if retry > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 		}
-		writeJSON(w, status, map[string]string{"message": fmt.Sprintf("fake node answers %d", status)})
+		if msg == "" {
+			msg = fmt.Sprintf("fake node answers %d", status)
+		}
+		writeJSON(w, status, map[string]string{"message": msg})
 		return
 	}
 	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
@@ -514,7 +530,7 @@ type ConfigReader struct {
 	DeveloperAPI bool
 	FollowMode   bool
 	TimeTravel   bool
-	HoldersIndex bool // TimeTravelHoldersIndex
+	HoldersIndex bool // TimeTravelHoldersIndex, as well as the node's own option
 }
 
 // Read implements ports.NodeConfigReader.
@@ -522,5 +538,5 @@ func (c ConfigReader) Read() (ports.NodeConfig, error) {
 	tt := c.TimeTravel || c.Node.opts.TimeTravel
 	return ports.NodeConfig{Endpoint: c.Node.URL(), NetAddr: strings.TrimPrefix(c.Node.URL(), "http://"), Token: c.Node.Token(), GenesisID: c.Node.opts.GenesisID,
 		Archival: c.Archival, MaxBlockHistoryLookback: c.Lookback, EnableDeveloperAPI: c.DeveloperAPI,
-		EnableFollowMode: c.FollowMode, EnableTimeTravel: tt, TimeTravelHoldersIndex: c.HoldersIndex, MaxAcctLookback: 4, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
+		EnableFollowMode: c.FollowMode, EnableTimeTravel: tt, TimeTravelHoldersIndex: c.HoldersIndex || c.Node.opts.HoldersIndex, MaxAcctLookback: 4, StorageEngine: "fake", RestWriteTimeoutSeconds: 120}, nil
 }

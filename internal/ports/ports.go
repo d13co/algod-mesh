@@ -60,12 +60,16 @@ type NodeConfig struct {
 	EnableFollowMode        bool
 	EnableExperimentalAPI   bool
 	EnableTimeTravel        bool
-	TimeTravelHoldersIndex  bool
+	TimeTravelHoldersIndex  bool // see HoldersIndex
 	MaxAcctLookback         uint64
 	StorageEngine           string
 	RestWriteTimeoutSeconds int
 	ModTime                 time.Time // config.json mtime, to detect edits
 }
+
+// HoldersIndex reports whether the node serves the asset holders index:
+// dtalgorand reads TimeTravelHoldersIndex only with EnableTimeTravel.
+func (c NodeConfig) HoldersIndex() bool { return c.EnableTimeTravel && c.TimeTravelHoldersIndex }
 
 // NodeConfigReader reads the local node's configuration.
 type NodeConfigReader interface {
@@ -135,7 +139,10 @@ type Outcome struct {
 	Err         error         // transport or upstream-rejection error
 	HeadersSent bool          // true once anything reached the client
 	Duration    time.Duration // as measured by the forwarder
-	RetryAfter  time.Duration // the upstream's Retry-After, in seconds form; 0 when absent
+	RetryAfter  time.Duration // the upstream's Retry-After; 0 when absent
+	// Message is the "message" of a withheld answer's JSON error body, as
+	// algod sends it; "" when there is none.
+	Message string
 }
 
 // Failed is true when the outcome should count against the upstream.

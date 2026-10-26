@@ -4,7 +4,7 @@ package domain
 // the best round known across the fleet and the sync tolerance.
 //
 // The rules, in order: not excluded by config; reachable; not draining;
-// breaker closed; not throttled, nor busy for a heavy request; time-travel
+// breaker closed; not throttled, nor busy for the request's slot; time-travel
 // history when the request needs it, and the asset holders index, not known
 // to be missing; synced (within tolerance of best) unless the class is
 // local-only or the request is for a specific round the node holds; the
@@ -16,7 +16,7 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if u.Excluded || !u.Health.Reachable() || u.Draining {
 		return false
 	}
-	if u.Stats.BreakerOpen || u.Stats.Throttled || u.Stats.Busy && c.Heavy() {
+	if u.Stats.BreakerOpen || u.Stats.Throttled || u.Stats.BusySlots.Has(c.Slot()) {
 		return false
 	}
 	if c.LocalOnly && u.Kind != KindLocal {

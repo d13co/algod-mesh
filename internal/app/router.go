@@ -450,22 +450,17 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		// The client left, or its allowance ran out: nothing about the upstream.
 	case timeLimited && out.Status == http.StatusGatewayTimeout:
 		// dtalgorand's time limit on one request, not a failing node.
-	case class.Heavy() && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
-		// dtalgorand's slots for heavy requests are full: send them elsewhere
-		// for a while, and the rest as before.
-		r.stats.Busy(u.ID, min(out.RetryAfter, maxBusy))
-		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
-	case class.Holders && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
-		// dtalgorand is overloaded: the page goes to another node, and
-		// nothing is held against this one. Not marked busy, which would
-		// keep simulations and deltas off it for a holders page.
-		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
 	case holdersMissing(class, out):
 		// The node's holders index is missing or stale: only ttimport, with
 		// the node stopped, builds it. Its other answers are unaffected.
 		r.stats.HoldersMissing(u.ID, holdersMissingFor)
 		r.metric.Inc("mesh_upstream_holders_missing", "upstream", u.ID)
 		r.log.Warn("upstream has no usable asset holders index", "upstream", u.ID)
+	case busy(class, out):
+		// The node has no room for more requests of this kind: send them
+		// elsewhere for a while, and the rest as before.
+		r.stats.Busy(u.ID, class.Slot(), min(out.RetryAfter, maxBusy))
+		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
 	default:
 		r.stats.Record(u.ID, class.StatKey(), out)
 	}
@@ -504,12 +499,21 @@ func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(int, http.Heade
 // only run it as long.
 var timeLimitPass = map[int]bool{http.StatusGatewayTimeout: true}
 
-// holdersMissing reports dtalgorand's answer to a holders page while its
-// index is missing or stale: a 503 without Retry-After (a busy node sends
-// one).
-func holdersMissing(class domain.RequestClass, out ports.Outcome) bool {
-	return class.Holders && out.Status == http.StatusServiceUnavailable && out.RetryAfter == 0
+// busy reports a node's answer to a request that takes a slot when it has
+// no room for more: 503 with Retry-After.
+func busy(class domain.RequestClass, out ports.Outcome) bool {
+	return class.Slot() != domain.SlotNone && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0
 }
+
+// holdersMissing reports dtalgorand's answer to a holders page while its
+// index is missing or stale: a 503 with ErrNoHoldersIndex's message. Any
+// other 503, such as a proxy's or a node starting up, is an ordinary failure.
+func holdersMissing(class domain.RequestClass, out ports.Outcome) bool {
+	return class.Holders && out.Status == http.StatusServiceUnavailable && strings.Contains(out.Message, holdersIndexIncomplete)
+}
+
+// holdersIndexIncomplete is in dtalgorand's message for ErrNoHoldersIndex.
+const holdersIndexIncomplete = "holders index is not complete"
 
 // holdersMissingFor is how long a node whose holders index is missing is
 // passed over for holders pages. The index stays missing until the node is
@@ -517,7 +521,7 @@ func holdersMissing(class domain.RequestClass, out ports.Outcome) bool {
 // node is tried again.
 const holdersMissingFor = time.Minute
 
-// maxBusy bounds how long a busy node is passed over for heavy requests,
+// maxBusy bounds how long a busy node is passed over for requests of a slot,
 // whatever its Retry-After says.
 const maxBusy = 10 * time.Second
 
@@ -547,7 +551,7 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 			return
 		}
 	}
-	if class.Heavy() && anyBusy(cands) {
+	if s := class.Slot(); s != domain.SlotNone && anyBusy(cands, s) {
 		w.Header().Set("Retry-After", "1")
 		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
 		return
@@ -567,10 +571,11 @@ func anySimulateLimits(us []domain.Upstream) bool {
 }
 
 // anyBusy reports whether any candidate that is not excluded is busy with
-// heavy requests: an excluded node being busy does not mean a retry helps.
-func anyBusy(us []domain.Upstream) bool {
+// requests taking slot: an excluded node being busy does not mean a retry
+// helps.
+func anyBusy(us []domain.Upstream, slot domain.Slot) bool {
 	for _, u := range us {
-		if u.Stats.Busy && !u.Excluded {
+		if u.Stats.BusySlots.Has(slot) && !u.Excluded {
 			return true
 		}
 	}
@@ -720,7 +725,15 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 	if !replay {
 		tries = tries[:1]
 	}
-	var last ports.Outcome
+	// last is the latest attempt's outcome, busyOut the busy answer with the
+	// soonest Retry-After: a client told to retry then may get a node that
+	// was only busy, where the last node tried may have failed for longer.
+	var last, busyOut ports.Outcome
+	note := func(out ports.Outcome) {
+		if busy(class, out) && (busyOut.Status == 0 || out.RetryAfter < busyOut.RetryAfter) {
+			busyOut = out
+		}
+	}
 	for i, u := range tries {
 		if i > 0 {
 			if !timeLeft(ctx) {
@@ -734,6 +747,7 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 		if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 			return
 		}
+		note(last)
 		if quotaExceeded(ctx) {
 			answerQuotaExceeded(ctx, w)
 			return
@@ -754,6 +768,7 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 			if !last.Failed() || last.HeadersSent || req.Context().Err() != nil {
 				return
 			}
+			note(last)
 			if quotaExceeded(ctx) {
 				answerQuotaExceeded(ctx, w)
 				return
@@ -763,6 +778,9 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 	if quotaExceeded(ctx) { // between attempts
 		answerQuotaExceeded(ctx, w)
 		return
+	}
+	if busyOut.Status != 0 && !errors.Is(last.Err, context.DeadlineExceeded) {
+		last = busyOut
 	}
 	r.answerFailure(w, req, class, last)
 }
@@ -804,7 +822,7 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 		return
 	case out.Err != nil && errors.Is(out.Err, context.DeadlineExceeded):
 		writeMessage(w, 504, "algod-mesh: upstream timeout")
-	case (class.Heavy() || class.Holders) && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0:
+	case busy(class, out):
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(out.RetryAfter), 10))
 		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
 	case holdersMissing(class, out):

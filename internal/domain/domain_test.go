@@ -123,6 +123,11 @@ func TestOverrideHoldersIndexImpliesTimeTravel(t *testing.T) {
 	if c.HoldersIndex || !c.TimeTravel {
 		t.Fatalf("holders_index: false keeps time travel: %+v", c)
 	}
+	// Without the history there is no index, whatever was detected.
+	c = (&CapabilityOverrides{TimeTravel: &no}).Apply(Capabilities{TimeTravel: true, HoldersIndex: true}, 0)
+	if c.HoldersIndex || c.TimeTravel {
+		t.Fatalf("time_travel: false keeps the holders index: %+v", c)
+	}
 	if equalOverrides(&CapabilityOverrides{HoldersIndex: &yes}, &CapabilityOverrides{HoldersIndex: &no}) {
 		t.Fatal("overrides differing in holders_index compare equal")
 	}
@@ -703,5 +708,23 @@ func TestBestRoundSkipsExcluded(t *testing.T) {
 	ex.Excluded = true
 	if got := BestRound([]Upstream{up("a", KindPeer, 1, HealthSynced, 10), ex}); got != 10 {
 		t.Fatalf("best round %d, want 10", got)
+	}
+}
+
+// A node busy with one kind of slot is passed over for that kind only.
+func TestBusySlotEligibility(t *testing.T) {
+	u := holdersUp()
+	u.Caps.Simulate = &SimulateLimits{MaxTxnGroups: 1}
+	u.Stats.BusySlots = Slots(0).With(SlotHolders)
+	holders := Classify("GET", "/v2/assets/7/holders", "")
+	sim := Classify("POST", "/v2/transactions/simulate", "")
+	if Eligible(u, holders, 5000, 0) {
+		t.Fatal("busy with holders pages, still eligible for one")
+	}
+	if !Eligible(u, sim, 5000, 0) || !Eligible(u, Classify("GET", "/v2/status", ""), 5000, 0) {
+		t.Fatal("busy with holders pages, passed over for the rest")
+	}
+	if Slots(0).With(SlotHeavy).Has(SlotNone) {
+		t.Fatal("SlotNone in a set")
 	}
 }

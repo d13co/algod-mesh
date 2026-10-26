@@ -266,12 +266,15 @@ func TestExcludedDtalgorandIsAbsent(t *testing.T) {
 // A busy excluded node does not make the router tell a heavy request that
 // every node able to serve it is busy: no retry would reach that node.
 func TestExcludedBusyNodeIsNotReported(t *testing.T) {
-	busy := domain.Upstream{ID: "x", Stats: domain.Stats{Busy: true}}
-	if !anyBusy([]domain.Upstream{busy}) {
+	busy := domain.Upstream{ID: "x", Stats: domain.Stats{BusySlots: domain.Slots(0).With(domain.SlotHeavy)}}
+	if !anyBusy([]domain.Upstream{busy}, domain.SlotHeavy) {
 		t.Fatal("busy node not counted")
 	}
+	if anyBusy([]domain.Upstream{busy}, domain.SlotHolders) {
+		t.Fatal("node busy with simulations counted for holders pages")
+	}
 	busy.Excluded = true
-	if anyBusy([]domain.Upstream{busy}) {
+	if anyBusy([]domain.Upstream{busy}, domain.SlotHeavy) {
 		t.Fatal("busy excluded node counted")
 	}
 }

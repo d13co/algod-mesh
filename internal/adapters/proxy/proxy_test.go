@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/d13co/algod-mesh/internal/ports"
 )
@@ -71,5 +72,44 @@ func TestForwardTransportError(t *testing.T) {
 	out := f.Forward(rec, httptest.NewRequest("GET", "/v2/status", nil), ports.Target{BaseURL: "http://127.0.0.1:1"})
 	if out.Err == nil || out.HeadersSent || out.Status != 0 {
 		t.Fatalf("outcome %+v", out)
+	}
+}
+
+// A withheld answer's JSON message reaches the router, so that it can tell
+// dtalgorand's reasons for a 503 apart; the client sees none of it.
+func TestForwardWithheldMessage(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(503)
+		w.Write([]byte(`{"message":"timetravel: the asset holders index is not complete"}`))
+	}))
+	defer up.Close()
+	rec := httptest.NewRecorder()
+	out := New(nil).Forward(rec, httptest.NewRequest("GET", "/v2/assets/7/holders", nil), ports.Target{BaseURL: up.URL})
+	if out.Status != 503 || out.Message != "timetravel: the asset holders index is not complete" || rec.Body.Len() != 0 {
+		t.Fatalf("outcome %+v, client saw %q", out, rec.Body.String())
+	}
+	if m := errorMessage(strings.NewReader("down")); m != "" {
+		t.Fatalf("message of a body that is not JSON: %q", m)
+	}
+}
+
+// Retry-After reads in seconds or as an HTTP date; 0 and a past date still
+// ask for a retry, and what cannot be read is none.
+func TestRetryAfter(t *testing.T) {
+	now := time.Date(2026, 10, 21, 7, 28, 0, 0, time.UTC)
+	for v, want := range map[string]time.Duration{
+		"":                              0,
+		"5":                             5 * time.Second,
+		" 2 ":                           2 * time.Second,
+		"0":                             time.Second,
+		"-1":                            0,
+		"soon":                          0,
+		"Wed, 21 Oct 2026 07:28:07 GMT": 7 * time.Second,
+		"Wed, 21 Oct 2026 07:00:00 GMT": time.Second,
+	} {
+		if got := retryAfter(v, now); got != want {
+			t.Errorf("retryAfter(%q) = %v, want %v", v, got, want)
+		}
 	}
 }

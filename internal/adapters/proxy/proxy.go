@@ -4,8 +4,10 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -62,11 +64,12 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
-			out.RetryAfter = retryAfter(resp.Header.Get("Retry-After"))
+			out.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), time.Now())
 			if t.OnResponse != nil {
 				t.OnResponse(resp.StatusCode, resp.Header)
 			}
 			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
+				out.Message = errorMessage(resp.Body)
 				resp.Body.Close()
 				return upstreamRejected{resp.StatusCode}
 			}
@@ -93,14 +96,41 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 	return out
 }
 
-// retryAfter reads a Retry-After in seconds; the HTTP-date form, which algod
-// does not send, reads as none.
-func retryAfter(v string) time.Duration {
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n <= 0 {
+// retryAfter reads a Retry-After, in seconds or as an HTTP date. A value of
+// 0 or a date already past reads as one second: the upstream still asked
+// for a retry. A missing or unreadable one reads as none (0).
+func retryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
 		return 0
 	}
-	return time.Duration(n) * time.Second
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 {
+			return 0
+		}
+		return max(time.Duration(n)*time.Second, time.Second)
+	}
+	at, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	return max(at.Sub(now).Round(time.Second), time.Second)
+}
+
+// maxErrorBody bounds how much of a withheld answer is read for its message.
+const maxErrorBody = 4 << 10
+
+// errorMessage reads the "message" of algod's JSON error body, "" when
+// there is none.
+func errorMessage(body io.Reader) string {
+	var e struct {
+		Message string `json:"message"`
+	}
+	b, _ := io.ReadAll(io.LimitReader(body, maxErrorBody))
+	if json.Unmarshal(b, &e) != nil {
+		return ""
+	}
+	return e.Message
 }
 
 // IsTimeout reports whether the outcome was a client/context timeout rather

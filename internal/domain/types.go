@@ -115,6 +115,9 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 		lim := *o.Simulate
 		c.Simulate = &lim
 	}
+	if !c.TimeTravel {
+		c.HoldersIndex = false // the index is part of the history
+	}
 	return c
 }
 
@@ -381,12 +384,13 @@ type Stats struct {
 	Inflight    int                `json:"inflight"`
 	BreakerOpen bool               `json:"breaker_open"`
 	Throttled   bool               `json:"throttled"`
-	// Busy is a node that answered a heavy request (Heavy) with 503 and
-	// Retry-After, its slots for them full: no heavy request goes to it
-	// until then, while the rest still do.
-	Busy bool `json:"busy,omitempty"`
-	// HoldersMissing is a node that answered an asset holders page with 503
-	// and no Retry-After: its holders index is missing or stale, which only
+	// BusySlots are the kinds of request (Slot) a node answered with 503
+	// and Retry-After, having no room for more: none of them goes to it
+	// until then, while the rest still do. Busy is whether there is any.
+	BusySlots Slots `json:"busy_slots,omitempty"`
+	Busy      bool  `json:"busy,omitempty"`
+	// HoldersMissing is a node that answered an asset holders page with
+	// dtalgorand's 503 for an index that is missing or stale, which only
 	// ttimport fixes with the node stopped. No holders page goes to it for
 	// a while, while the rest still do.
 	HoldersMissing bool `json:"holders_missing,omitempty"`
