@@ -60,6 +60,9 @@ type Capabilities struct {
 	// endpoints and the /versions history endpoints at any past round, even
 	// when Archival is off.
 	TimeTravel bool `json:"time_travel,omitempty"`
+	// HoldersIndex is a time-travel node with TimeTravelHoldersIndex, so it
+	// answers GET /v2/assets/{asset-id}/holders, once its index is built.
+	HoldersIndex bool `json:"holders_index,omitempty"`
 	// Simulate is what the node allows in a simulate request, as dtalgorand
 	// reports it at GET /v2/transactions/simulate/limits. nil is a stock
 	// algod (or an agent too old to ask): one transaction group, no rounds
@@ -78,6 +81,9 @@ type CapabilityOverrides struct {
 	DeveloperAPI *bool     `json:"developer_api,omitempty" yaml:"developer_api,omitempty"`
 	FollowMode   *bool     `json:"follow_mode,omitempty" yaml:"follow_mode,omitempty"`
 	TimeTravel   *bool     `json:"time_travel,omitempty" yaml:"time_travel,omitempty"`
+	// HoldersIndex declares TimeTravelHoldersIndex; true implies TimeTravel,
+	// which the index needs.
+	HoldersIndex *bool `json:"holders_index,omitempty" yaml:"holders_index,omitempty"`
 	// Simulate pins the simulate limits, for an upstream the agent cannot
 	// ask (an external) or one that answers wrongly.
 	Simulate *SimulateLimits `json:"simulate,omitempty" yaml:"simulate,omitempty"`
@@ -101,9 +107,16 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 	if o.TimeTravel != nil {
 		c.TimeTravel = *o.TimeTravel
 	}
+	if o.HoldersIndex != nil {
+		c.HoldersIndex = *o.HoldersIndex
+		c.TimeTravel = c.TimeTravel || c.HoldersIndex
+	}
 	if o.Simulate != nil {
 		lim := *o.Simulate
 		c.Simulate = &lim
+	}
+	if !c.TimeTravel {
+		c.HoldersIndex = false // the index is part of the history
 	}
 	return c
 }
@@ -290,8 +303,9 @@ func equalOverrides(a, b *CapabilityOverrides) bool {
 	eqD := (a.DeveloperAPI == nil && b.DeveloperAPI == nil) || (a.DeveloperAPI != nil && b.DeveloperAPI != nil && *a.DeveloperAPI == *b.DeveloperAPI)
 	eqF := (a.FollowMode == nil && b.FollowMode == nil) || (a.FollowMode != nil && b.FollowMode != nil && *a.FollowMode == *b.FollowMode)
 	eqT := (a.TimeTravel == nil && b.TimeTravel == nil) || (a.TimeTravel != nil && b.TimeTravel != nil && *a.TimeTravel == *b.TimeTravel)
+	eqH := (a.HoldersIndex == nil && b.HoldersIndex == nil) || (a.HoldersIndex != nil && b.HoldersIndex != nil && *a.HoldersIndex == *b.HoldersIndex)
 	eqS := (a.Simulate == nil && b.Simulate == nil) || (a.Simulate != nil && b.Simulate != nil && *a.Simulate == *b.Simulate)
-	return eqA && eqD && eqF && eqT && eqS
+	return eqA && eqD && eqF && eqT && eqH && eqS
 }
 
 // Health is the liveness/sync state of an upstream as seen by an agent.
@@ -370,10 +384,16 @@ type Stats struct {
 	Inflight    int                `json:"inflight"`
 	BreakerOpen bool               `json:"breaker_open"`
 	Throttled   bool               `json:"throttled"`
-	// Busy is a node that answered a heavy request (Heavy) with 503 and
-	// Retry-After, its slots for them full: no heavy request goes to it
-	// until then, while the rest still do.
-	Busy bool `json:"busy,omitempty"`
+	// BusySlots are the kinds of request (Slot) a node answered with 503
+	// and Retry-After, having no room for more: none of them goes to it
+	// until then, while the rest still do. Busy is whether there is any.
+	BusySlots Slots `json:"busy_slots,omitempty"`
+	Busy      bool  `json:"busy,omitempty"`
+	// HoldersMissing is a node that answered an asset holders page with
+	// dtalgorand's 503 for an index that is missing or stale, which only
+	// ttimport fixes with the node stopped. No holders page goes to it for
+	// a while, while the rest still do.
+	HoldersMissing bool `json:"holders_missing,omitempty"`
 }
 
 // Upstream is one candidate the router chooses between. It is a value

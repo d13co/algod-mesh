@@ -180,14 +180,14 @@ func (m *Monitor) readConfig() {
 	})
 	m.log.Info("node config", "endpoint", cfg.Endpoint, "genesis", cfg.GenesisID, "archival", cfg.Archival,
 		"lookback", cfg.MaxBlockHistoryLookback, "dev", cfg.EnableDeveloperAPI, "follow", cfg.EnableFollowMode,
-		"time_travel", cfg.EnableTimeTravel)
+		"time_travel", cfg.EnableTimeTravel, "holders_index", cfg.HoldersIndex())
 }
 
 func capsFromConfig(cfg ports.NodeConfig, prev domain.Capabilities, lastRound uint64, ov *domain.CapabilityOverrides) domain.Capabilities {
 	c := domain.Capabilities{
 		DeveloperAPI: cfg.EnableDeveloperAPI, FollowMode: cfg.EnableFollowMode, ExperimentalAPI: cfg.EnableExperimentalAPI,
-		TimeTravel: cfg.EnableTimeTravel,
-		GenesisID:  cfg.GenesisID, StorageEngine: cfg.StorageEngine, MaxAcctLookback: cfg.MaxAcctLookback,
+		TimeTravel: cfg.EnableTimeTravel, HoldersIndex: cfg.HoldersIndex(),
+		GenesisID: cfg.GenesisID, StorageEngine: cfg.StorageEngine, MaxAcctLookback: cfg.MaxAcctLookback,
 		AlgodVersion: prev.AlgodVersion, Simulate: prev.Simulate,
 	}
 	switch {

@@ -71,12 +71,43 @@ type RequestClass struct {
 	// Deltas marks GET /v2/deltas/{round}, which a time-travel node
 	// re-evaluates from its history for a round past its lookback.
 	Deltas bool
+	// Holders marks GET /v2/assets/{asset-id}/holders, an asset's holders
+	// at a round, which only a node with TimeTravelHoldersIndex answers.
+	Holders bool
 }
 
-// Heavy reports whether the request can keep a node busy for long: a
-// simulation or a state delta. dtalgorand answers these with 503 and
-// Retry-After when its slots for them are full.
-func (c RequestClass) Heavy() bool { return c.Simulate || c.Deltas }
+// Slot is a kind of request that can keep a node busy for long. A node
+// answers one with 503 and Retry-After when it has no room for more of its
+// kind, and is then passed over for that kind for a while, while it keeps
+// serving the rest.
+type Slot uint8
+
+const (
+	SlotNone    Slot = iota // not limited this way
+	SlotHeavy               // simulations and state deltas
+	SlotHolders             // asset holders pages
+	SlotCount               // the number of kinds, SlotNone included
+)
+
+// Slots is a set of Slot.
+type Slots uint8
+
+// Has reports whether s is in the set; SlotNone never is.
+func (ss Slots) Has(s Slot) bool { return s != SlotNone && ss&(1<<s) != 0 }
+
+// With returns the set with s added.
+func (ss Slots) With(s Slot) Slots { return ss | 1<<s }
+
+// Slot reports the kind of slot the request takes, SlotNone for most.
+func (c RequestClass) Slot() Slot {
+	switch {
+	case c.Simulate || c.Deltas:
+		return SlotHeavy
+	case c.Holders:
+		return SlotHolders
+	}
+	return SlotNone
+}
 
 // SimulateNeeds is what a simulate request needs of the node that runs it.
 // It is the router's preference, not algod's rule: when no node fits, the
@@ -239,6 +270,9 @@ func (c RequestClass) String() string {
 	if c.Deltas {
 		parts = append(parts, "deltas")
 	}
+	if c.Holders {
+		parts = append(parts, "holders")
+	}
 	if c.Round != nil {
 		switch c.RoundWindow {
 		case WindowState:
@@ -390,6 +424,19 @@ func Classify(method, path, rawQuery string) RequestClass {
 		case seg(1) == "applications" && seg(3) == "boxes":
 			// Stock algod takes round on a box listing, within its
 			// account-state lookback; a time-travel node serves any round.
+			if ok {
+				c.Round = &r
+				c.RoundWindow = WindowState
+				c.HistoryAnyRound = true
+			}
+		case seg(1) == "assets" && seg(3) == "holders" && len(segs) == 4:
+			// dtalgorand's holders index: its own route, GET only, at any
+			// round of the history, the latest without one. Other methods
+			// have no route anywhere: any node answers 405.
+			if method != "GET" {
+				break
+			}
+			c.Holders, c.TimeTravel = true, true
 			if ok {
 				c.Round = &r
 				c.RoundWindow = WindowState

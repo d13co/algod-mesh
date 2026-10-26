@@ -232,6 +232,7 @@ func checkNodeCmd(args []string) error {
 		"archival": nc.Archival, "max_block_history_lookback": nc.MaxBlockHistoryLookback,
 		"developer_api": nc.EnableDeveloperAPI, "follow_mode": nc.EnableFollowMode,
 		"experimental_api": nc.EnableExperimentalAPI, "time_travel": nc.EnableTimeTravel,
+		"holders_index":  nc.HoldersIndex(),
 		"storage_engine": nc.StorageEngine}
 	var arch domain.Archival
 	switch {
@@ -446,9 +447,10 @@ func devCmd(args []string) error {
 	var specs []devfleet.NodeSpec
 	for i := 0; i < *n; i++ {
 		// dev1 is archival, the last node has the developer API and time
-		// travel, the rest are plain nodes keeping the last 1000 rounds.
+		// travel with the holders index, the rest are plain nodes keeping
+		// the last 1000 rounds.
 		spec := devfleet.NodeSpec{ID: fmt.Sprintf("dev%d", i+1), StartRound: 5000, Archival: i == 0,
-			DeveloperAPI: i == *n-1, TimeTravel: i == *n-1, Tier: 1}
+			DeveloperAPI: i == *n-1, TimeTravel: i == *n-1, HoldersIndex: i == *n-1, Tier: 1}
 		if i > 0 {
 			spec.OldestRound = 4000
 		}

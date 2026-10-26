@@ -27,12 +27,12 @@ func TestReadDataDir(t *testing.T) {
 	if nc.Archival || nc.MaxBlockHistoryLookback != 0 || nc.MaxAcctLookback != 4 || nc.RestWriteTimeoutSeconds != 120 {
 		t.Fatalf("defaults: %+v", nc)
 	}
-	write("config.json", `{"Version": 34, "MaxBlockHistoryLookback": 3500000, "EnableDeveloperAPI": true, "EnableFollowMode": false, "EnableTimeTravel": true, "UnknownKey": 1}`)
+	write("config.json", `{"Version": 34, "MaxBlockHistoryLookback": 3500000, "EnableDeveloperAPI": true, "EnableFollowMode": false, "EnableTimeTravel": true, "TimeTravelHoldersIndex": true, "UnknownKey": 1}`)
 	nc, err = Reader{Dir: dir}.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nc.MaxBlockHistoryLookback != 3500000 || !nc.EnableDeveloperAPI || !nc.EnableTimeTravel || nc.ModTime.IsZero() {
+	if nc.MaxBlockHistoryLookback != 3500000 || !nc.EnableDeveloperAPI || !nc.EnableTimeTravel || !nc.TimeTravelHoldersIndex || nc.ModTime.IsZero() {
 		t.Fatalf("%+v", nc)
 	}
 	write("config.json", `{"DisableAPIAuth": true}`)

@@ -39,7 +39,8 @@ type upstreamStats struct {
 	probing        bool
 	openUntil      time.Time
 	throttledUntil time.Time
-	busyUntil      time.Time
+	busyUntil      [domain.SlotCount]time.Time
+	holdersUntil   time.Time // holders index missing or stale until then
 }
 
 // NewStatsBook creates an empty book.
@@ -107,13 +108,28 @@ func (b *StatsBook) Record(id, key string, out ports.Outcome) {
 	}
 }
 
-// Busy marks an upstream that answered a heavy request with 503 and
-// Retry-After: its slots for them are full for d. It is not a failure.
-func (b *StatsBook) Busy(id string, d time.Duration) {
+// Busy marks an upstream that answered a request taking slot with 503 and
+// Retry-After: it has no room for more of them for d. It is not a failure.
+func (b *StatsBook) Busy(id string, slot domain.Slot, d time.Duration) {
+	if slot == domain.SlotNone {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if until := b.clock.Now().Add(d); until.After(b.get(id).busyUntil) {
-		b.get(id).busyUntil = until
+	s := b.get(id)
+	if until := b.clock.Now().Add(d); until.After(s.busyUntil[slot]) {
+		s.busyUntil[slot] = until
+	}
+}
+
+// HoldersMissing marks an upstream whose asset holders index is missing or
+// stale, as its 503 to a holders page says, for d. It is not a failure.
+func (b *StatsBook) HoldersMissing(id string, d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.get(id)
+	if until := b.clock.Now().Add(d); until.After(s.holdersUntil) {
+		s.holdersUntil = until
 	}
 }
 
@@ -142,7 +158,13 @@ func (b *StatsBook) Snapshot(id string) domain.Stats {
 	}
 	st := domain.Stats{LatencyMS: lat, Inflight: s.inflight,
 		BreakerOpen: now.Before(s.openUntil), Throttled: now.Before(s.throttledUntil),
-		Busy: now.Before(s.busyUntil)}
+		HoldersMissing: now.Before(s.holdersUntil)}
+	for slot, until := range s.busyUntil {
+		if now.Before(until) {
+			st.BusySlots = st.BusySlots.With(domain.Slot(slot))
+		}
+	}
+	st.Busy = st.BusySlots != 0
 	if n > 0 {
 		st.ErrorRate = float64(fails) / float64(n)
 	}

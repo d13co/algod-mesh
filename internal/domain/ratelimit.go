@@ -99,18 +99,19 @@ func (c SimulateCaps) Check(n SimulateNeeds) string {
 }
 
 // The cost keys: what a request is billed as before it runs. They are the
-// stat keys (StatKey), with two heavy kinds of time-travel request split out.
+// stat keys (StatKey), with three heavy kinds of time-travel request split out.
 const (
 	CostVersions      = "versions"       // an object history page
 	CostDeltasHistory = "deltas_history" // a state delta re-evaluated from the history
+	CostHolders       = "holders"        // a page of an asset's holders
 )
 
 // CostKeys lists every key a CostWeights may set.
-var CostKeys = []string{"default", "round", "timetravel", "simulate", "broadcast", "pending", "wait", "teal", CostVersions, CostDeltasHistory}
+var CostKeys = []string{"default", "round", "timetravel", "simulate", "broadcast", "pending", "wait", "teal", CostVersions, CostDeltasHistory, CostHolders}
 
 // DefaultCostWeights is what each kind of request costs unless configured.
 var DefaultCostWeights = CostWeights{"default": 1, "round": 1, "timetravel": 2, "simulate": 5, "broadcast": 1,
-	"pending": 1, "wait": 1, "teal": 1, CostVersions: 10, CostDeltasHistory: 50}
+	"pending": 1, "wait": 1, "teal": 1, CostVersions: 10, CostDeltasHistory: 50, CostHolders: 10}
 
 // recentDeltaRounds is how far behind the best round a state delta is still
 // served from the node's own lookback (MaxAcctLookback, 4 by default) rather
@@ -122,6 +123,8 @@ func CostKey(c RequestClass, best uint64) string {
 	switch {
 	case c.Versions:
 		return CostVersions
+	case c.Holders:
+		return CostHolders
 	case c.Deltas && c.Round != nil && *c.Round+recentDeltaRounds < best:
 		return CostDeltasHistory
 	}
