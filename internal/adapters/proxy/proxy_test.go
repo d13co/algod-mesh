@@ -92,6 +92,21 @@ func TestForwardWithheldMessage(t *testing.T) {
 	if m := errorMessage(strings.NewReader("down")); m != "" {
 		t.Fatalf("message of a body that is not JSON: %q", m)
 	}
+	// A chunked body, or another status's, is closed unread.
+	for _, status := range []int{503, 502} {
+		chunked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			if status == 503 {
+				w.(http.Flusher).Flush() // no Content-Length
+			}
+			w.Write([]byte(`{"message":"unread"}`))
+		}))
+		out = New(nil).Forward(httptest.NewRecorder(), httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: chunked.URL})
+		chunked.Close()
+		if out.Status != status || out.Message != "" {
+			t.Fatalf("%d: outcome %+v", status, out)
+		}
+	}
 }
 
 // Retry-After reads in seconds or as an HTTP date; 0 and a past date still

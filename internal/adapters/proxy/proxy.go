@@ -69,7 +69,9 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 				t.OnResponse(resp.StatusCode, resp.Header)
 			}
 			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
-				out.Message = errorMessage(resp.Body)
+				if readMessage(resp) {
+					out.Message = errorMessage(resp.Body)
+				}
 				resp.Body.Close()
 				return upstreamRejected{resp.StatusCode}
 			}
@@ -119,6 +121,14 @@ func retryAfter(v string, now time.Time) time.Duration {
 
 // maxErrorBody bounds how much of a withheld answer is read for its message.
 const maxErrorBody = 4 << 10
+
+// readMessage reports whether a withheld answer's message is read: only a
+// 503's, the one whose reason the router tells apart, and only when its
+// body is declared and small. Any other body is closed unread, so that one
+// sent slowly or not at all never holds up the retry on another node.
+func readMessage(resp *http.Response) bool {
+	return resp.StatusCode == http.StatusServiceUnavailable && resp.ContentLength > 0 && resp.ContentLength <= maxErrorBody
+}
 
 // errorMessage reads the "message" of algod's JSON error body, "" when
 // there is none.

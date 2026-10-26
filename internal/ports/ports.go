@@ -140,8 +140,9 @@ type Outcome struct {
 	HeadersSent bool          // true once anything reached the client
 	Duration    time.Duration // as measured by the forwarder
 	RetryAfter  time.Duration // the upstream's Retry-After; 0 when absent
-	// Message is the "message" of a withheld answer's JSON error body, as
-	// algod sends it; "" when there is none.
+	// Message is the "message" of a withheld 503's JSON error body, as algod
+	// sends it; "" when there is none, or it is not short with a declared
+	// length.
 	Message string
 }
 
