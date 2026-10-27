@@ -328,7 +328,7 @@ func TestRateLimit(t *testing.T) {
   enabled: true
   trusted_proxies: [127.0.0.1, 10.0.0.0/8]
   weights: {simulate: 7}
-  effort: {opcodes_per_credit: 1000, trace_kb_per_credit: 0}
+  effort: {opcodes_per_credit: 1000, response_kb_per_credit: 0}
   plans:
     free: {per_minute: 300, per_day: 50000, simulate: {max_groups: 1, exec_trace: false}}
     pro: {per_minute: 6000}
@@ -346,7 +346,7 @@ func TestRateLimit(t *testing.T) {
 	if r.Weights["simulate"] != 7 || r.Weights["default"] != 1 || r.Weights["deltas_history"] != 50 {
 		t.Fatalf("weights: %v", r.Weights)
 	}
-	if e := r.EffortRatesOf(); e.OpcodesPerCredit != 1000 || e.TraceKBPerCredit != 0 || e.HistoryPerCredit != 1000 {
+	if e := r.EffortRatesOf(); e.OpcodesPerCredit != 1000 || e.ResponseKBPerCredit != 0 || e.HistoryPerCredit != 1000 {
 		t.Fatalf("effort rates: %+v", e)
 	}
 	if r.Tokens[0].Token != "acme-secret" || len(r.TrustedPrefixes()) != 2 {
@@ -374,6 +374,7 @@ func TestRateLimit(t *testing.T) {
 		{"ratelimit: {enabled: true, plans: {free: {per_minute: -1}}}\n", "negative"},
 		{"ratelimit: {enabled: true, weights: {nope: 1}, plans: {free: {}}}\n", "weights.nope"},
 		{"ratelimit: {enabled: true, effort: {nope: 1}, plans: {free: {}}}\n", "effort.nope"},
+		{"ratelimit: {enabled: true, effort: {trace_kb_per_credit: 1}, plans: {free: {}}}\n", "response_kb_per_credit"},
 		{"ratelimit: {enabled: true, effort: {opcodes_per_credit: -1}, plans: {free: {}}}\n", "effort.opcodes_per_credit"},
 		{"ratelimit: {enabled: true, effort: {opcodes_per_credit: .nan}, plans: {free: {}}}\n", "effort.opcodes_per_credit"},
 		{"ratelimit: {enabled: true, effort: {lookups_per_credit: .inf}, plans: {free: {}}}\n", "effort.lookups_per_credit"},

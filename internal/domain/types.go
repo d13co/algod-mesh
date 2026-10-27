@@ -129,11 +129,9 @@ type SimulateLimits struct {
 	MaxRounds               uint64 `json:"max_rounds" yaml:"max_rounds"` // 0: rounds is disabled
 	MaxExtraOpcodeBudget    uint64 `json:"max_extra_opcode_budget" yaml:"max_extra_opcode_budget"`
 	ResourceLimitMultiplier uint64 `json:"resource_limit_multiplier" yaml:"resource_limit_multiplier"`
-	// MaxExecTraceBytes caps one request's exec trace (400 beyond), and
-	// TimeLimitSeconds its run time (504, or per-round errors for a rounds
-	// list); 0 is no limit, or a dtalgorand from before they existed.
-	MaxExecTraceBytes uint64 `json:"max_exec_trace_bytes,omitempty" yaml:"max_exec_trace_bytes,omitempty"`
-	TimeLimitSeconds  uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
+	// TimeLimitSeconds caps one request's run time (504, or per-round errors
+	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
+	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
 }
 
 // StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod

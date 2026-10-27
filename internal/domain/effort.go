@@ -14,21 +14,23 @@ const EffortHeader = "X-Algod-Effort"
 // Effort is what a node reports in EffortHeader. A rounds simulation reports
 // all of its rounds together.
 type Effort struct {
-	Opcodes    uint64 // app and logicsig budget consumed
-	Lookups    uint64 // ledger object reads the ledger served
-	History    uint64 // the lookups that fell through to the time-travel store
-	Scanned    uint64 // entries visited by scans: history pages, ?round= lists
-	TraceBytes uint64 // the exec trace's estimated size
-	EvalUS     uint64 // wall time of the work, in microseconds; diagnostics only
+	Opcodes       uint64 // app and logicsig budget consumed
+	Lookups       uint64 // ledger object reads the ledger served
+	History       uint64 // the lookups that fell through to the time-travel store
+	Scanned       uint64 // entries visited by scans: history pages, ?round= lists
+	ResponseBytes uint64 // the answer's encoded size before compression; 0 for ?round= reads and errors
+	EvalUS        uint64 // wall time of the work, in microseconds; diagnostics only
 }
 
 // ParseEffort reads an EffortHeader value, the node's field lines joined
 // with commas. Unknown keys and parameters are ignored; eval-us may be left
 // out. The billed keys must each appear once with a non-negative integer:
 // a header missing one is not an effort, so that a broken node is billed by
-// time rather than for nothing. Members are split on commas, which would
-// misread a string or byte sequence holding one; the node sends only
-// integers, and an unknown member that is cut in two is still ignored.
+// time rather than for nothing; that includes a node from before
+// response-bytes, which sent trace-bytes in its place. Members are split on
+// commas, which would misread a string or byte sequence holding one; the
+// node sends only integers, and an unknown member that is cut in two is
+// still ignored.
 func ParseEffort(v string) (Effort, bool) {
 	var e Effort
 	seen := map[string]bool{}
@@ -58,7 +60,7 @@ func ParseEffort(v string) (Effort, bool) {
 }
 
 // billedEffortKeys are the keys a node always sends that cost credits.
-var billedEffortKeys = []string{"opcodes", "lookups", "history", "scanned", "trace-bytes"}
+var billedEffortKeys = []string{"opcodes", "lookups", "history", "scanned", "response-bytes"}
 
 func (e *Effort) field(key string) *uint64 {
 	switch key {
@@ -70,8 +72,8 @@ func (e *Effort) field(key string) *uint64 {
 		return &e.History
 	case "scanned":
 		return &e.Scanned
-	case "trace-bytes":
-		return &e.TraceBytes
+	case "response-bytes":
+		return &e.ResponseBytes
 	case "eval-us":
 		return &e.EvalUS
 	}
@@ -81,7 +83,7 @@ func (e *Effort) field(key string) *uint64 {
 // Add sums two efforts: one request's attempts on several nodes.
 func (e Effort) Add(o Effort) Effort {
 	return Effort{e.Opcodes + o.Opcodes, e.Lookups + o.Lookups, e.History + o.History,
-		e.Scanned + o.Scanned, e.TraceBytes + o.TraceBytes, e.EvalUS + o.EvalUS}
+		e.Scanned + o.Scanned, e.ResponseBytes + o.ResponseBytes, e.EvalUS + o.EvalUS}
 }
 
 // EffortRates converts reported work into credits: so many units of each
@@ -89,20 +91,20 @@ func (e Effort) Add(o Effort) Effort {
 // lookups are counted among the lookups as well, so HistoryPerCredit prices
 // what a store read costs on top of a plain one.
 type EffortRates struct {
-	OpcodesPerCredit float64
-	LookupsPerCredit float64
-	HistoryPerCredit float64
-	ScannedPerCredit float64
-	TraceKBPerCredit float64
+	OpcodesPerCredit    float64
+	LookupsPerCredit    float64
+	HistoryPerCredit    float64
+	ScannedPerCredit    float64
+	ResponseKBPerCredit float64
 }
 
 // DefaultEffortRates are placeholders, set so that a busy simulation costs
 // about what the wall-time meter's default of 20 credits a second bills
 // (one credit is ~50 ms of a node's time): ~150 ns per budget unit, a few
 // µs per cached lookup or scanned entry, ~50 µs per store read, and a MiB of
-// trace per credit.
+// answer per credit, so that a large trace or many logs cost their encoding.
 var DefaultEffortRates = EffortRates{OpcodesPerCredit: 330000, LookupsPerCredit: 10000,
-	HistoryPerCredit: 1000, ScannedPerCredit: 10000, TraceKBPerCredit: 1024}
+	HistoryPerCredit: 1000, ScannedPerCredit: 10000, ResponseKBPerCredit: 1024}
 
 // Credits is what effort e costs.
 func (r EffortRates) Credits(e Effort) float64 {
@@ -114,5 +116,5 @@ func (r EffortRates) Credits(e Effort) float64 {
 	}
 	return per(e.Opcodes, r.OpcodesPerCredit) + per(e.Lookups, r.LookupsPerCredit) +
 		per(e.History, r.HistoryPerCredit) + per(e.Scanned, r.ScannedPerCredit) +
-		per(e.TraceBytes, r.TraceKBPerCredit*1024)
+		per(e.ResponseBytes, r.ResponseKBPerCredit*1024)
 }

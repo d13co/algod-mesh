@@ -172,7 +172,6 @@ type FleetSimulateLimitsReply struct {
 	MaxTxnGroups            uint64 `json:"max-txn-groups"`
 	ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
 	TimeTravel              bool   `json:"time-travel"`
-	MaxExecTraceBytes       uint64 `json:"max-exec-trace-bytes"`
 	TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
 }
 
@@ -210,7 +209,7 @@ func FleetSimulateLimits(us []Upstream, bestRound, tolerance uint64) (FleetSimul
 	l := best.Caps.SimulateLimits()
 	return FleetSimulateLimitsReply{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds, MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget,
 		ResourceLimitMultiplier: multiplier, TimeTravel: best.Caps.TimeTravel, DeveloperAPI: best.Caps.DeveloperAPI,
-		MaxExecTraceBytes: l.MaxExecTraceBytes, TimeLimitSeconds: l.TimeLimitSeconds}, true
+		TimeLimitSeconds: l.TimeLimitSeconds}, true
 }
 
 // simulateLimitsAbove orders nodes for FleetSimulateLimits: whether a's

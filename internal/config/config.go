@@ -70,19 +70,19 @@ type RateLimit struct {
 }
 
 // EffortKeys are the keys of ratelimit.effort.
-var EffortKeys = []string{"opcodes_per_credit", "lookups_per_credit", "history_per_credit", "scanned_per_credit", "trace_kb_per_credit"}
+var EffortKeys = []string{"opcodes_per_credit", "lookups_per_credit", "history_per_credit", "scanned_per_credit", "response_kb_per_credit"}
 
 // EffortRates is rates as a ratelimit.effort map.
 func EffortRates(r domain.EffortRates) map[string]float64 {
 	return map[string]float64{"opcodes_per_credit": r.OpcodesPerCredit, "lookups_per_credit": r.LookupsPerCredit,
-		"history_per_credit": r.HistoryPerCredit, "scanned_per_credit": r.ScannedPerCredit, "trace_kb_per_credit": r.TraceKBPerCredit}
+		"history_per_credit": r.HistoryPerCredit, "scanned_per_credit": r.ScannedPerCredit, "response_kb_per_credit": r.ResponseKBPerCredit}
 }
 
 // EffortRatesOf is the domain rates of a finished ratelimit.effort map.
 func (r RateLimit) EffortRatesOf() domain.EffortRates {
 	e := r.Effort
 	return domain.EffortRates{OpcodesPerCredit: e["opcodes_per_credit"], LookupsPerCredit: e["lookups_per_credit"],
-		HistoryPerCredit: e["history_per_credit"], ScannedPerCredit: e["scanned_per_credit"], TraceKBPerCredit: e["trace_kb_per_credit"]}
+		HistoryPerCredit: e["history_per_credit"], ScannedPerCredit: e["scanned_per_credit"], ResponseKBPerCredit: e["response_kb_per_credit"]}
 }
 
 // RatePlan is one plan's allowance: credits per minute and per day, 0 for
@@ -174,6 +174,9 @@ func (r *RateLimit) finish(clientToken, adminToken string) error {
 	r.Weights = weights
 	effort := EffortRates(domain.DefaultEffortRates)
 	for k, v := range r.Effort {
+		if k == "trace_kb_per_credit" {
+			return fmt.Errorf("ratelimit.effort.%s: removed, as dtalgorand no longer reports trace-bytes; response_kb_per_credit prices the size of the answer instead", k)
+		}
 		if _, ok := effort[k]; !ok {
 			return fmt.Errorf("ratelimit.effort.%s: unknown; want one of %s", k, strings.Join(EffortKeys, ", "))
 		}

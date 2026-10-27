@@ -370,8 +370,8 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
 			"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier,
-			"max-exec-trace-bytes": l.MaxExecTraceBytes, "time-limit-seconds": l.TimeLimitSeconds,
-			"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI})
+			"time-limit-seconds": l.TimeLimitSeconds,
+			"time-travel":        n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI})
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
 		tx, ok := n.pool[seg(3)]
