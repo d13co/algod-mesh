@@ -78,6 +78,11 @@ func TestCostBase(t *testing.T) {
 		c.ApplySimulate(body)
 		return c
 	}
+	query := func(body QueryBody) RequestClass {
+		c := Classify("POST", "/v2/query", "")
+		c.ApplyQuery(body)
+		return c
+	}
 	groups := func(n int) []struct{} { return make([]struct{}, n) }
 	for _, tc := range []struct {
 		name  string
@@ -96,6 +101,9 @@ func TestCostBase(t *testing.T) {
 		{"one group", sim(SimulateBody{TxnGroups: groups(1)}), "simulate", 5},
 		{"groups by rounds", sim(SimulateBody{TxnGroups: groups(3), Rounds: []uint64{10, 20}}), "simulate", 30},
 		{"unread body", Classify("POST", "/v2/transactions/simulate", ""), "simulate", 5},
+		{"one call", query(QueryBody{Calls: groups(1)}), "query", 0.25},
+		{"calls by rounds", query(QueryBody{Calls: groups(8), Rounds: []uint64{10, 20}}), "query", 4},
+		{"unread query", Classify("POST", "/v2/query", ""), "query", 0.25},
 	} {
 		if k := CostKey(tc.class, 1000); k != tc.key {
 			t.Errorf("%s: key %q, want %q", tc.name, k, tc.key)
@@ -112,20 +120,21 @@ func TestCostBase(t *testing.T) {
 }
 
 func TestParseEffort(t *testing.T) {
-	const rest = ", history=0, scanned=0, trace-bytes=0"
+	const rest = ", history=0, scanned=0, response-bytes=0"
 	for _, tc := range []struct {
 		v    string
 		want Effort
 		ok   bool
 	}{
-		{"opcodes=184220, lookups=912, history=640, scanned=0, trace-bytes=0, eval-us=5310",
-			Effort{Opcodes: 184220, Lookups: 912, History: 640, EvalUS: 5310}, true},
-		{"trace-bytes=9,scanned=2,history=1,lookups=3,opcodes=7", Effort{7, 3, 1, 2, 9, 0}, true},         // order and spacing are free; eval-us may be left out
+		{"opcodes=184220, lookups=912, history=640, scanned=0, response-bytes=48213, eval-us=5310",
+			Effort{Opcodes: 184220, Lookups: 912, History: 640, ResponseBytes: 48213, EvalUS: 5310}, true},
+		{"response-bytes=9,scanned=2,history=1,lookups=3,opcodes=7", Effort{7, 3, 1, 2, 9, 0}, true},      // order and spacing are free; eval-us may be left out
 		{"opcodes=7;x=1, future=?1, other=\"s\", lookups=1" + rest, Effort{Opcodes: 7, Lookups: 1}, true}, // parameters and unknown keys are ignored
 		{"", Effort{}, false},
 		{" , ", Effort{}, false},
 		{"foo=1", Effort{}, false}, // no billed keys
 		{"opcodes=7, lookups=3", Effort{}, false},
+		{"opcodes=7, lookups=3, history=0, scanned=0, trace-bytes=0", Effort{}, false}, // a node from before response-bytes
 		{"opcodes=-1, lookups=1" + rest, Effort{}, false},
 		{"opcodes=1.5, lookups=1" + rest, Effort{}, false},
 		{"opcodes, lookups=1" + rest, Effort{}, false},              // a boolean, not a count
@@ -142,15 +151,15 @@ func TestParseEffort(t *testing.T) {
 }
 
 func TestEffortCredits(t *testing.T) {
-	r := EffortRates{OpcodesPerCredit: 1000, LookupsPerCredit: 100, HistoryPerCredit: 10, ScannedPerCredit: 50, TraceKBPerCredit: 1}
-	e := Effort{Opcodes: 2000, Lookups: 200, History: 20, Scanned: 100, TraceBytes: 2048, EvalUS: 1 << 30}
+	r := EffortRates{OpcodesPerCredit: 1000, LookupsPerCredit: 100, HistoryPerCredit: 10, ScannedPerCredit: 50, ResponseKBPerCredit: 1}
+	e := Effort{Opcodes: 2000, Lookups: 200, History: 20, Scanned: 100, ResponseBytes: 2048, EvalUS: 1 << 30}
 	if c := r.Credits(e); c != 2+2+2+2+2 {
 		t.Fatalf("credits %v, want 10 (eval-us is not billed)", c)
 	}
 	if c := (EffortRates{}).Credits(e); c != 0 {
 		t.Fatalf("no rates: %v", c)
 	}
-	if s := e.Add(e); s.Opcodes != 4000 || s.TraceBytes != 4096 {
+	if s := e.Add(e); s.Opcodes != 4000 || s.ResponseBytes != 4096 {
 		t.Fatalf("add: %+v", s)
 	}
 }

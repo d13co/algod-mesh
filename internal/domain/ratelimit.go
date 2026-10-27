@@ -61,12 +61,41 @@ func (w Window) UntilFull(level float64) time.Duration { return w.Wait(level, w.
 func (w Window) Full(b Bucket) bool { return !w.Limited() || b.Level >= w.Capacity }
 
 // Plan is what one client may spend: credits per minute and per day, and what
-// a simulate request may ask of a node.
+// a simulate or query request may ask of a node.
 type Plan struct {
 	Name     string
 	Minute   Window
 	Day      Window
 	Simulate SimulateCaps
+	Query    QueryCaps
+}
+
+// QueryCaps bounds what one query of a plan may ask for. A zero cap is no
+// cap.
+//
+// TODO(review): the caps and the rule that a capped budget must be set are a
+// first guess; revisit them with the query weight.
+type QueryCaps struct {
+	MaxCalls  int
+	MaxRounds int
+	MaxBudget uint64
+}
+
+// Check returns why a query asking for n is beyond the caps, or "" when it
+// is within them. A query with no rounds runs at one, the latest.
+func (c QueryCaps) Check(n QueryNeeds) string {
+	switch {
+	case c.MaxCalls > 0 && n.Calls > c.MaxCalls:
+		return fmt.Sprintf("this plan allows at most %d calls in one query", c.MaxCalls)
+	case c.MaxRounds > 0 && n.Rounds > c.MaxRounds:
+		return fmt.Sprintf("this plan allows at most %d rounds in one query", c.MaxRounds)
+	case c.MaxBudget > 0 && n.Budget > c.MaxBudget:
+		return fmt.Sprintf("this plan allows a query budget of at most %d", c.MaxBudget)
+	case c.MaxBudget > 0 && n.Budget == 0:
+		// The node's own budget, which may be larger.
+		return fmt.Sprintf("this plan needs a query to set its budget, of at most %d", c.MaxBudget)
+	}
+	return ""
 }
 
 // SimulateCaps bounds what one simulate request of a plan may ask for. A zero
@@ -107,10 +136,13 @@ const (
 )
 
 // CostKeys lists every key a CostWeights may set.
-var CostKeys = []string{"default", "round", "timetravel", "simulate", "broadcast", "pending", "wait", "teal", CostVersions, CostDeltasHistory, CostHolders}
+var CostKeys = []string{"default", "round", "timetravel", "simulate", "query", "broadcast", "pending", "wait", "teal", CostVersions, CostDeltasHistory, CostHolders}
 
 // DefaultCostWeights is what each kind of request costs unless configured.
-var DefaultCostWeights = CostWeights{"default": 1, "round": 1, "timetravel": 2, "simulate": 5, "broadcast": 1,
+//
+// TODO(review): the query weight (0.25 per call and round) is a placeholder,
+// not measured. Set it from benchmarks of POST /v2/query against simulate.
+var DefaultCostWeights = CostWeights{"default": 1, "round": 1, "timetravel": 2, "simulate": 5, "query": 0.25, "broadcast": 1,
 	"pending": 1, "wait": 1, "teal": 1, CostVersions: 10, CostDeltasHistory: 50, CostHolders: 10}
 
 // recentDeltaRounds is how far behind the best round a state delta is still
@@ -132,7 +164,8 @@ func CostKey(c RequestClass, best uint64) string {
 }
 
 // CostWeights is the credits each cost key costs. A simulate request costs
-// its weight once per group and round it asks for.
+// its weight once per group and round it asks for, a query once per call and
+// round.
 type CostWeights map[string]float64
 
 // Base is what request c costs before it runs.
@@ -140,6 +173,9 @@ func (w CostWeights) Base(c RequestClass, best uint64) float64 {
 	v := w[CostKey(c, best)]
 	if n := c.SimNeeds; c.Simulate && n != nil {
 		v *= float64(max(n.Groups, 1) * max(n.Rounds, 1))
+	}
+	if n := c.QueryNeeds; c.Query && n != nil {
+		v *= float64(max(n.Calls, 1)) * float64(max(n.Rounds, 1))
 	}
 	return v
 }

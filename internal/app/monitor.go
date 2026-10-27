@@ -504,6 +504,10 @@ func fmtLimits(l *domain.SimulateLimits, err error) string {
 	case l == nil:
 		return "stock"
 	}
-	return fmt.Sprintf("groups=%d rounds=%d budget=%d multiplier=%d trace_bytes=%d time_limit=%ds", l.MaxTxnGroups, l.MaxRounds,
-		l.MaxExtraOpcodeBudget, l.ResourceLimitMultiplier, l.MaxExecTraceBytes, l.TimeLimitSeconds)
+	s := fmt.Sprintf("groups=%d rounds=%d budget=%d multiplier=%d time_limit=%ds", l.MaxTxnGroups, l.MaxRounds,
+		l.MaxExtraOpcodeBudget, l.ResourceLimitMultiplier, l.TimeLimitSeconds)
+	if q := l.Query; q.MaxCalls > 0 {
+		s += fmt.Sprintf(" query_calls=%d query_rounds=%d query_budget=%d", q.MaxCalls, q.MaxRounds, q.MaxCallBudget)
+	}
+	return s
 }

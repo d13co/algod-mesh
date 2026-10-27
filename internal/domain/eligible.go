@@ -10,8 +10,8 @@ package domain
 // local-only or the request is for a specific round the node holds; the
 // round is in the window the class needs (block or account state), and
 // every round a simulation lists has been reached; developer API
-// when needed; the simulate limits and options the request needs; no
-// broadcast to followers.
+// when needed; the simulate or query limits and options the request needs;
+// no broadcast to followers.
 func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if u.Excluded || !u.Health.Reachable() || u.Draining {
 		return false
@@ -53,7 +53,7 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 		}
 		// A node that holds the round can serve it even while lagging,
 		// unless a simulation also asks for the latest round.
-		if c.SimNeeds != nil && c.SimNeeds.Latest && !inSync(u, bestRound, tolerance) {
+		if c.needsLatest() && !inSync(u, bestRound, tolerance) {
 			return false
 		}
 	} else if !c.LocalOnly && !inSync(u, bestRound, tolerance) {
@@ -68,6 +68,12 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 		return false
 	}
 	if c.SimNeeds != nil && !c.SimNeeds.Fits(u.Caps) {
+		return false
+	}
+	if c.Query && !c.QueryAnyNode && !u.Caps.Queries() {
+		return false
+	}
+	if c.QueryNeeds != nil && !c.QueryNeeds.Fits(u.Caps) {
 		return false
 	}
 	if c.Broadcast && u.Caps.FollowMode {
@@ -172,8 +178,20 @@ type FleetSimulateLimitsReply struct {
 	MaxTxnGroups            uint64 `json:"max-txn-groups"`
 	ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
 	TimeTravel              bool   `json:"time-travel"`
-	MaxExecTraceBytes       uint64 `json:"max-exec-trace-bytes"`
 	TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
+	// Query is what a POST /v2/query sent to the mesh may ask for; absent
+	// when no eligible node has queries.
+	Query *FleetQueryLimits `json:"query,omitempty"`
+}
+
+// FleetQueryLimits is the limits response's query object, in dtalgorand's
+// own form.
+type FleetQueryLimits struct {
+	MaxCalls         uint64 `json:"max-calls"`
+	MaxCallBudget    uint64 `json:"max-call-budget"`
+	MaxCallLogBytes  uint64 `json:"max-call-log-bytes"`
+	MaxResponseBytes uint64 `json:"max-response-bytes"`
+	MaxRounds        uint64 `json:"max-rounds"`
 }
 
 // FleetSimulateLimits is what a simulate request sent to the mesh may ask
@@ -188,12 +206,21 @@ type FleetSimulateLimitsReply struct {
 // included: no request asks for it, so the router may send a request to any
 // of them, and that is what it is sure to get. ok is false when no eligible
 // upstream reports limits, a fleet of stock algods.
+//
+// The query object is that of the eligible node with the largest query
+// limits, compared in order: calls, rounds, call budget, time travel, then
+// its id. It is picked apart from the simulate limits, as a query is routed
+// apart from a simulation.
 func FleetSimulateLimits(us []Upstream, bestRound, tolerance uint64) (FleetSimulateLimitsReply, bool) {
-	var best *Upstream
+	var best, bestQuery *Upstream
 	var multiplier uint64
 	plain := RequestClass{Simulate: true, Idempotent: true}
+	query := RequestClass{Query: true, Idempotent: true}
 	for i := range us {
 		u := &us[i]
+		if Eligible(*u, query, bestRound, tolerance) && (bestQuery == nil || queryLimitsAbove(*u, *bestQuery)) {
+			bestQuery = u
+		}
 		if !Eligible(*u, plain, bestRound, tolerance) {
 			continue
 		}
@@ -208,9 +235,31 @@ func FleetSimulateLimits(us []Upstream, bestRound, tolerance uint64) (FleetSimul
 		return FleetSimulateLimitsReply{}, false
 	}
 	l := best.Caps.SimulateLimits()
-	return FleetSimulateLimitsReply{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds, MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget,
+	reply := FleetSimulateLimitsReply{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds, MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget,
 		ResourceLimitMultiplier: multiplier, TimeTravel: best.Caps.TimeTravel, DeveloperAPI: best.Caps.DeveloperAPI,
-		MaxExecTraceBytes: l.MaxExecTraceBytes, TimeLimitSeconds: l.TimeLimitSeconds}, true
+		TimeLimitSeconds: l.TimeLimitSeconds}
+	if bestQuery != nil {
+		q := bestQuery.Caps.QueryLimits()
+		reply.Query = &FleetQueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
+			MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
+	}
+	return reply, true
+}
+
+// queryLimitsAbove orders nodes for the query object of FleetSimulateLimits.
+func queryLimitsAbove(a, b Upstream) bool {
+	la, lb := a.Caps.QueryLimits(), b.Caps.QueryLimits()
+	switch {
+	case la.MaxCalls != lb.MaxCalls:
+		return la.MaxCalls > lb.MaxCalls
+	case la.MaxRounds != lb.MaxRounds:
+		return la.MaxRounds > lb.MaxRounds
+	case la.MaxCallBudget != lb.MaxCallBudget:
+		return la.MaxCallBudget > lb.MaxCallBudget
+	case a.Caps.TimeTravel != b.Caps.TimeTravel:
+		return a.Caps.TimeTravel
+	}
+	return a.ID < b.ID
 }
 
 // simulateLimitsAbove orders nodes for FleetSimulateLimits: whether a's

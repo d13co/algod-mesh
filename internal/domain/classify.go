@@ -59,9 +59,22 @@ type RequestClass struct {
 	// it. The router fills it in once it has read the body (ApplySimulate);
 	// it is nil before that and for every other request.
 	SimNeeds *SimulateNeeds
-	// RoundHigh is the latest round a simulate request's "rounds" lists: a
-	// node must have reached it too, while Round, the earliest, is the one
-	// its window must cover. 0 when the request names at most one round.
+	// Query marks POST /v2/query, dtalgorand's read-only TEAL calls, whose
+	// body the router reads as it does a simulation's. Only a node that
+	// reports query limits answers it, unless QueryAnyNode.
+	Query bool
+	// QueryNeeds is what a query's body asks of the node that runs it, filled
+	// in once the router has read the body (ApplyQuery); nil before that, for
+	// a body it could not read, and for every other request.
+	QueryNeeds *QueryNeeds
+	// QueryAnyNode lets a query reach a node without queries: the last
+	// relaxation, when no node in the fleet has them, so that algod answers
+	// with its 404 as it would alone.
+	QueryAnyNode bool
+	// RoundHigh is the latest round a simulate or query request's "rounds"
+	// lists: a node must have reached it too, while Round, the earliest, is
+	// the one its window must cover. 0 when the request names at most one
+	// round.
 	RoundHigh uint64
 	// SimulateLimits marks GET /v2/transactions/simulate/limits, which the
 	// router answers for the fleet (dtalgorand).
@@ -101,12 +114,24 @@ func (ss Slots) With(s Slot) Slots { return ss | 1<<s }
 // Slot reports the kind of slot the request takes, SlotNone for most.
 func (c RequestClass) Slot() Slot {
 	switch {
-	case c.Simulate || c.Deltas:
+	case c.Evaluates() || c.Deltas:
 		return SlotHeavy
 	case c.Holders:
 		return SlotHolders
 	}
 	return SlotNone
+}
+
+// Evaluates reports whether the request runs TEAL: a simulation or a query.
+// One can run for seconds, so it is billed by its running time and stopped
+// when its client's allowance runs out, and it is not retried after it ran
+// out of time.
+func (c RequestClass) Evaluates() bool { return c.Simulate || c.Query }
+
+// needsLatest reports whether a request that names past rounds also asks
+// for the node's own latest round, which the node must then be in sync for.
+func (c RequestClass) needsLatest() bool {
+	return (c.SimNeeds != nil && c.SimNeeds.Latest) || (c.QueryNeeds != nil && c.QueryNeeds.Latest)
 }
 
 // SimulateNeeds is what a simulate request needs of the node that runs it.
@@ -215,13 +240,84 @@ func (c *RequestClass) ApplySimulate(b SimulateBody) {
 	c.SimNeeds = &n
 }
 
+// QueryNeeds is what a query needs of the node that runs it. Like
+// SimulateNeeds it is the router's preference, relaxed when no node fits.
+type QueryNeeds struct {
+	Calls  int    // len(calls)
+	Rounds int    // len(rounds), duplicates included; 0 is the latest alone
+	Budget uint64 // the opcode budget each call asks for; 0 is the node's own
+	// DeveloperAPI marks protocol future, which the node runs only with
+	// EnableDeveloperAPI.
+	DeveloperAPI bool
+	// RoundsSpan marks Round and RoundHigh as taken from rounds. The node
+	// answers each round alone: one it cannot read is an error in that
+	// round's result.
+	RoundsSpan bool
+	// Latest marks a rounds list with a 0 entry, which the node resolves to
+	// its own last round.
+	Latest bool
+}
+
+// Fits reports whether a node with capabilities c accepts the query.
+func (n QueryNeeds) Fits(c Capabilities) bool {
+	if !c.Queries() || (n.DeveloperAPI && !c.DeveloperAPI) {
+		return false
+	}
+	l := c.QueryLimits()
+	return uint64(n.Calls) <= l.MaxCalls && uint64(n.Rounds) <= l.MaxRounds && n.Budget <= l.MaxCallBudget
+}
+
+// QueryBody is the part of a query body routing reads, with dtalgorand's
+// tags for both msgpack and JSON; every other field is skipped.
+type QueryBody struct {
+	Calls    []struct{} `codec:"calls" json:"calls"`
+	Rounds   []uint64   `codec:"rounds" json:"rounds"`
+	Budget   uint64     `codec:"budget" json:"budget"`
+	Protocol string     `codec:"protocol" json:"protocol"`
+}
+
+// ApplyQuery refines a query's class with what its body asks. Its rounds
+// bound the node's window as a simulation's rounds list does: each is read
+// from the account-state lookback, or from the history at any round. With
+// no rounds, or only 0s, the query runs at the node's latest round.
+func (c *RequestClass) ApplyQuery(b QueryBody) {
+	n := QueryNeeds{Calls: len(b.Calls), Rounds: len(b.Rounds), Budget: b.Budget,
+		DeveloperAPI: b.Protocol == protocolFuture}
+	var lo, hi uint64
+	for _, r := range b.Rounds {
+		if r == 0 {
+			n.Latest = true
+			continue
+		}
+		if lo == 0 || r < lo {
+			lo = r
+		}
+		hi = max(hi, r)
+	}
+	if hi > 0 {
+		c.Round = &lo
+		c.RoundWindow = WindowState
+		c.HistoryAnyRound = true
+		c.RoundHigh = hi
+		n.RoundsSpan = true
+	}
+	c.QueryNeeds = &n
+}
+
 // Relaxed lists the classes selection falls back to, in order, when no
 // upstream is eligible for c. A simulate request with a rounds list first
 // drops the rounds, which the node reports one by one as it cannot simulate
 // them, then the rest of its needs, so that a node rejects the request with
 // its own message rather than the router with a 503. A single round is kept:
 // a node that lacks it would answer the latest state or an error.
+//
+// A query drops its rounds the same way, then its limits, so that a node
+// with queries says what it does not allow, and last its need for queries
+// at all, so that algod answers 404 as it does alone.
 func (c RequestClass) Relaxed() []RequestClass {
+	if c.Query {
+		return c.relaxedQuery()
+	}
 	if c.SimNeeds == nil {
 		return nil
 	}
@@ -231,6 +327,23 @@ func (c RequestClass) Relaxed() []RequestClass {
 		out = append(out, c)
 	}
 	c.SimNeeds = nil
+	return append(out, c)
+}
+
+func (c RequestClass) relaxedQuery() []RequestClass {
+	if c.QueryAnyNode {
+		return nil
+	}
+	var out []RequestClass
+	if c.QueryNeeds != nil {
+		if c.QueryNeeds.RoundsSpan {
+			c.Round, c.RoundHigh, c.RoundWindow, c.HistoryAnyRound = nil, 0, WindowBlock, false
+			out = append(out, c)
+		}
+		c.QueryNeeds = nil
+		out = append(out, c)
+	}
+	c.QueryAnyNode = true
 	return append(out, c)
 }
 
@@ -301,6 +414,24 @@ func (c RequestClass) String() string {
 			parts = append(parts, "sim_dev")
 		}
 	}
+	if c.Query {
+		parts = append(parts, "query")
+	}
+	if n := c.QueryNeeds; n != nil {
+		parts = append(parts, fmt.Sprintf("query_calls=%d", n.Calls))
+		if n.Rounds > 0 {
+			parts = append(parts, fmt.Sprintf("query_rounds=%d", n.Rounds))
+		}
+		if n.Budget > 0 {
+			parts = append(parts, fmt.Sprintf("query_budget=%d", n.Budget))
+		}
+		if n.DeveloperAPI {
+			parts = append(parts, "query_dev")
+		}
+	}
+	if c.QueryAnyNode {
+		parts = append(parts, "query_any_node")
+	}
 	if c.LocalOnly {
 		parts = append(parts, "local_only")
 	}
@@ -320,6 +451,9 @@ func (c RequestClass) StatKey() string {
 		// One simulation can run for seconds (many groups, many rounds):
 		// it must not skew the latency of the requests it would share with.
 		return "simulate"
+	case c.Query:
+		// Like a simulation, a query of many calls and rounds runs long.
+		return "query"
 	case c.Round != nil:
 		return "round"
 	case c.Broadcast:
@@ -488,6 +622,13 @@ func Classify(method, path, rawQuery string) RequestClass {
 			c.Simulate = true
 		case seg(2) == "params":
 			// suggested params: any synced node
+		}
+	case "query":
+		// dtalgorand's read-only TEAL calls: POST only, with no subpath.
+		// Any other request has no route on any node.
+		if method == "POST" && seg(2) == "" {
+			c.Query = true
+			c.Idempotent = true
 		}
 	case "participation", "shutdown", "catchup", "devmode":
 		c.LocalOnly = true // admin API is never proxied to other nodes

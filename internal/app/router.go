@@ -165,23 +165,23 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	start := r.clock.Now()
 	class := domain.Classify(req.Method, req.URL.Path, req.URL.RawQuery)
 	sw := &statusWriter{ResponseWriter: w, origin: req.Header.Get("Origin") != ""}
-	// A closure, so the log sees the class as refineSimulate leaves it.
+	// A closure, so the log sees the class as refineBody leaves it.
 	defer func() { r.logRequest(sw, req, class, start) }()
-	if class.Simulate && !r.refineSimulate(req, &class) {
+	if class.Evaluates() && !r.refineBody(req, &class) {
 		writeMessage(sw, http.StatusBadRequest, "algod-mesh: cannot read request body")
 		return
 	}
 	r.serve(sw, req, class)
 }
 
-// refineSimulate reads a simulate request body and refines the class with
-// what it asks of the node (domain.ApplySimulate): the round or rounds it
-// simulates at, how many groups and rounds it holds, its extra opcode budget,
-// and the options only dtalgorand or the developer API allow. The body is
-// restored for forwarding, sized like replayable so that a retry can send it
-// again. It reports false only when the body could not be read, which the
-// caller answers with a 400.
-func (r *Router) refineSimulate(req *http.Request, class *domain.RequestClass) bool {
+// refineBody reads a simulate or query request body and refines the class
+// with what it asks of the node (domain.ApplySimulate, domain.ApplyQuery):
+// the round or rounds it runs at, how many groups, calls and rounds it
+// holds, its opcode budget, and the options only dtalgorand or the developer
+// API allow. The body is restored for forwarding, sized like replayable so
+// that a retry can send it again. It reports false only when the body could
+// not be read, which the caller answers with a 400.
+func (r *Router) refineBody(req *http.Request, class *domain.RequestClass) bool {
 	if req.Body == nil {
 		return true
 	}
@@ -191,23 +191,37 @@ func (r *Router) refineSimulate(req *http.Request, class *domain.RequestClass) b
 	}
 	if len(prefix) > maxReplayBody {
 		// Too large to hold, so the body is not inspected. algod caps a
-		// simulate request at 1 MB anyway, so this body is already invalid.
+		// simulate or query request at 1 MB anyway, so this body is already
+		// invalid.
 		req.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), req.Body))
 		return true
 	}
 	req.Body = io.NopCloser(bytes.NewReader(prefix))
 	req.ContentLength = int64(len(prefix))
-	var body domain.SimulateBody
 	// algod accepts msgpack or JSON; the SDKs post msgpack and set no
 	// Content-Type, so try msgpack first exactly as the node does.
-	if codec.NewDecoderBytes(prefix, &codec.MsgpackHandle{}).Decode(&body) != nil {
-		body = domain.SimulateBody{}
-		if json.Unmarshal(prefix, &body) != nil {
-			return true
+	if class.Query {
+		var body domain.QueryBody
+		if decodeBody(prefix, &body) {
+			class.ApplyQuery(body)
 		}
+		return true
 	}
-	class.ApplySimulate(body)
+	var body domain.SimulateBody
+	if decodeBody(prefix, &body) {
+		class.ApplySimulate(body)
+	}
 	return true
+}
+
+// decodeBody decodes a request body as msgpack, else as JSON, into the
+// zero value v points to. It reports whether either worked.
+func decodeBody[T any](b []byte, v *T) bool {
+	if codec.NewDecoderBytes(b, &codec.MsgpackHandle{}).Decode(v) == nil {
+		return true
+	}
+	*v = *new(T)
+	return json.Unmarshal(b, v) == nil
 }
 
 // logRequest writes the access log line: INFO, except health probes at DEBUG.
@@ -345,8 +359,8 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		// forward hands the ticket what the nodes report doing.
 		ctx = context.WithValue(ctx, ticketKey{}, ticket)
 	}
-	if ticket != nil && class.Simulate {
-		// The limiter cancels the simulation once its client's allowance
+	if ticket != nil && class.Evaluates() {
+		// The limiter cancels the simulation or query once its client's allowance
 		// runs out; forwardSelected tells that cause apart.
 		var cancelCause context.CancelCauseFunc
 		ctx, cancelCause = context.WithCancelCause(ctx)
@@ -436,7 +450,7 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	defer cancel()
 	release := r.stats.Begin(u.ID)
 	target := ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry}
-	timeLimited := class.Simulate || class.Deltas || class.Versions || class.Holders
+	timeLimited := class.Evaluates() || class.Deltas || class.Versions || class.Holders
 	if timeLimited {
 		target.PassStatus = timeLimitPass
 	}
@@ -623,7 +637,7 @@ const holdersMissingMessage = "algod-mesh: the asset holders index is missing or
 func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	sel, cands, best, ok := r.pick(ctx, class, cands, best)
 	if !ok {
-		// No node in the fleet fits a simulate request: relax it so that a
+		// No node in the fleet fits a simulate request or query: relax it so that a
 		// node answers it, rejecting what it cannot do as a lone algod
 		// would. Each step is taken only when no node could serve the one
 		// before, so that a fitting node that is briefly out gets the
@@ -636,8 +650,12 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 			}
 			prev = rc
 			if sel, ok = r.sel(cands, rc, best); ok {
-				r.metric.Inc("mesh_simulate_relaxed")
-				r.log.Debug("no upstream fits the simulate request, relaxed", "class", class.String(), "relaxed", rc.String())
+				if class.Query {
+					r.metric.Inc("mesh_query_relaxed")
+				} else {
+					r.metric.Inc("mesh_simulate_relaxed")
+				}
+				r.log.Debug("no upstream fits the request, relaxed", "class", class.String(), "relaxed", rc.String())
 				class = rc
 				break
 			}
@@ -752,8 +770,8 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 			answerQuotaExceeded(ctx, w)
 			return
 		}
-		if class.Simulate && errors.Is(last.Err, context.DeadlineExceeded) {
-			// A simulation that ran out of time would only run as long on
+		if class.Evaluates() && errors.Is(last.Err, context.DeadlineExceeded) {
+			// A simulation or query that ran out of time would only run as long on
 			// the next node, for nothing: the client gets the timeout.
 			r.answerFailure(w, req, class, last)
 			return

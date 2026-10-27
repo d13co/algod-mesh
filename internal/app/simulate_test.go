@@ -86,7 +86,7 @@ func (f *simFleet) simulate(t *testing.T, body string) string {
 	return rec.Header().Get("X-Algod-Mesh-Upstream")
 }
 
-var testLimits = domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 2, MaxExecTraceBytes: 1 << 20, TimeLimitSeconds: 30}
+var testLimits = domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 2, TimeLimitSeconds: 30}
 
 // A simulate request that only dtalgorand can run reaches the dtalgorand
 // node; a stock node would reject it. One that fits stock algod still goes
@@ -174,7 +174,7 @@ func TestSimulateLimitsForFleet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := domain.FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1, TimeTravel: true, MaxExecTraceBytes: 1 << 20, TimeLimitSeconds: 30}
+	want := domain.FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1, TimeTravel: true, TimeLimitSeconds: 30}
 	if got != want {
 		t.Fatalf("limits %+v, want %+v", got, want)
 	}

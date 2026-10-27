@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 func load(t *testing.T, yaml string) (Config, error) {
@@ -328,9 +330,9 @@ func TestRateLimit(t *testing.T) {
   enabled: true
   trusted_proxies: [127.0.0.1, 10.0.0.0/8]
   weights: {simulate: 7}
-  effort: {opcodes_per_credit: 1000, trace_kb_per_credit: 0}
+  effort: {opcodes_per_credit: 1000, response_kb_per_credit: 0}
   plans:
-    free: {per_minute: 300, per_day: 50000, simulate: {max_groups: 1, exec_trace: false}}
+    free: {per_minute: 300, per_day: 50000, simulate: {max_groups: 1, exec_trace: false}, query: {max_calls: 64, max_rounds: 2, max_budget: 1000}}
     pro: {per_minute: 6000}
   tokens:
     - {name: acme, plan: pro, token_file: `+tokFile+`}
@@ -346,7 +348,7 @@ func TestRateLimit(t *testing.T) {
 	if r.Weights["simulate"] != 7 || r.Weights["default"] != 1 || r.Weights["deltas_history"] != 50 {
 		t.Fatalf("weights: %v", r.Weights)
 	}
-	if e := r.EffortRatesOf(); e.OpcodesPerCredit != 1000 || e.TraceKBPerCredit != 0 || e.HistoryPerCredit != 1000 {
+	if e := r.EffortRatesOf(); e.OpcodesPerCredit != 1000 || e.ResponseKBPerCredit != 0 || e.HistoryPerCredit != 1000 {
 		t.Fatalf("effort rates: %+v", e)
 	}
 	if r.Tokens[0].Token != "acme-secret" || len(r.TrustedPrefixes()) != 2 {
@@ -355,6 +357,9 @@ func TestRateLimit(t *testing.T) {
 	// The agent finishes the loaded config again.
 	if err := c.Finish(); err != nil || c.RateLimit.Tokens[0].Token != "acme-secret" {
 		t.Fatalf("second Finish: %v, %+v", err, c.RateLimit.Tokens)
+	}
+	if q := r.Plans["free"].Query; q != (QueryCaps{MaxCalls: 64, MaxRounds: 2, MaxBudget: 1000}) || r.Weights["query"] != 0.25 {
+		t.Fatalf("query caps %+v, weight %v", q, r.Weights["query"])
 	}
 	if p := r.Plans["free"].Simulate; p.ExecTrace == nil || *p.ExecTrace || p.UnnamedResources != nil {
 		t.Fatalf("simulate caps: %+v", p)
@@ -374,10 +379,12 @@ func TestRateLimit(t *testing.T) {
 		{"ratelimit: {enabled: true, plans: {free: {per_minute: -1}}}\n", "negative"},
 		{"ratelimit: {enabled: true, weights: {nope: 1}, plans: {free: {}}}\n", "weights.nope"},
 		{"ratelimit: {enabled: true, effort: {nope: 1}, plans: {free: {}}}\n", "effort.nope"},
+		{"ratelimit: {enabled: true, effort: {trace_kb_per_credit: 1}, plans: {free: {}}}\n", "response_kb_per_credit"},
 		{"ratelimit: {enabled: true, effort: {opcodes_per_credit: -1}, plans: {free: {}}}\n", "effort.opcodes_per_credit"},
 		{"ratelimit: {enabled: true, effort: {opcodes_per_credit: .nan}, plans: {free: {}}}\n", "effort.opcodes_per_credit"},
 		{"ratelimit: {enabled: true, effort: {lookups_per_credit: .inf}, plans: {free: {}}}\n", "effort.lookups_per_credit"},
 		{"ratelimit: {enabled: true, weights: {simulate: .nan}, plans: {free: {}}}\n", "weights.simulate"},
+		{"ratelimit: {enabled: true, plans: {free: {query: {max_calls: -1}}}}\n", "free.query"},
 		{"ratelimit: {enabled: true, simulate_per_second: .nan, plans: {free: {}}}\n", "simulate_per_second"},
 		{"ratelimit: {enabled: true, plans: {free: {per_day: .nan}}}\n", "negative"},
 		{"ratelimit: {enabled: true, anonymous_plan: gold, plans: {free: {}}}\n", "gold"},
@@ -393,5 +400,25 @@ func TestRateLimit(t *testing.T) {
 		if _, err := load(t, base+tc.yaml); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v, want an error about %q", tc.yaml, err, tc.want)
 		}
+	}
+}
+
+// A node's query limits can be pinned with its simulate limits.
+func TestQueryLimitsOverride(t *testing.T) {
+	c, err := load(t, `local:
+  id: k44
+  data_dir: /tmp/x
+  overrides:
+    simulate: {max_txn_groups: 16, query: {max_calls: 1024, max_call_budget: 320000, max_rounds: 16}}
+registry:
+  type: memory
+  auto_register: false
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Local.Overrides.Simulate
+	if s == nil || s.MaxTxnGroups != 16 || s.Query != (domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxRounds: 16}) {
+		t.Fatalf("overrides: %+v", s)
 	}
 }

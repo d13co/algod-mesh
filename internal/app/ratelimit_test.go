@@ -570,7 +570,7 @@ func TestRateLimitRefundsBusy(t *testing.T) {
 // billed client, who sees the cost; an external is not believed.
 func TestRateLimitEffortThroughRouter(t *testing.T) {
 	f := newLimitedFleet(t, domain.Plan{Minute: perMinute(1000)}, domain.Plan{}, 1)
-	const effort = "opcodes=660000, lookups=0, history=0, scanned=0, trace-bytes=0, eval-us=5"
+	const effort = "opcodes=660000, lookups=0, history=0, scanned=0, response-bytes=0, eval-us=5"
 	f.b.SetEffort("/v2/transactions/simulate", effort)
 	f.c.SetEffort("/v2/transactions/simulate", effort)
 	rec := f.call("POST", "/v2/transactions/simulate", "", clientA, `{"txn-groups":[{}]}`)
@@ -601,7 +601,7 @@ func TestRateLimitEffortThroughRouter(t *testing.T) {
 	// A report on two field lines is read whole, and neither line reaches
 	// the client.
 	tk, _ = l.Admit(Identity{Key: "ip:y", Plan: "free"}, domain.Classify("POST", "/v2/transactions/simulate", ""), 0)
-	h = http.Header{domain.EffortHeader: {"opcodes=7, lookups=3", "history=0, scanned=0, trace-bytes=0"}}
+	h = http.Header{domain.EffortHeader: {"opcodes=7, lookups=3", "history=0, scanned=0, response-bytes=0"}}
 	f.r.effortReader(tk, domain.Upstream{ID: "b", Kind: domain.KindPeer})(200, h)
 	if len(h.Values(domain.EffortHeader)) != 0 || tk.effort != (domain.Effort{Opcodes: 7, Lookups: 3}) {
 		t.Fatalf("two lines: header %q, effort %+v", h.Values(domain.EffortHeader), tk.effort)
