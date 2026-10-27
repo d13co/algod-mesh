@@ -78,6 +78,11 @@ func TestCostBase(t *testing.T) {
 		c.ApplySimulate(body)
 		return c
 	}
+	query := func(body QueryBody) RequestClass {
+		c := Classify("POST", "/v2/query", "")
+		c.ApplyQuery(body)
+		return c
+	}
 	groups := func(n int) []struct{} { return make([]struct{}, n) }
 	for _, tc := range []struct {
 		name  string
@@ -96,6 +101,9 @@ func TestCostBase(t *testing.T) {
 		{"one group", sim(SimulateBody{TxnGroups: groups(1)}), "simulate", 5},
 		{"groups by rounds", sim(SimulateBody{TxnGroups: groups(3), Rounds: []uint64{10, 20}}), "simulate", 30},
 		{"unread body", Classify("POST", "/v2/transactions/simulate", ""), "simulate", 5},
+		{"one call", query(QueryBody{Calls: groups(1)}), "query", 0.25},
+		{"calls by rounds", query(QueryBody{Calls: groups(8), Rounds: []uint64{10, 20}}), "query", 4},
+		{"unread query", Classify("POST", "/v2/query", ""), "query", 0.25},
 	} {
 		if k := CostKey(tc.class, 1000); k != tc.key {
 			t.Errorf("%s: key %q, want %q", tc.name, k, tc.key)

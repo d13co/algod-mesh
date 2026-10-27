@@ -154,13 +154,26 @@ func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, er
 		MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
 		ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
 		TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
+		// Absent on a node without POST /v2/query.
+		Query *struct {
+			MaxCalls         uint64 `json:"max-calls"`
+			MaxCallBudget    uint64 `json:"max-call-budget"`
+			MaxCallLogBytes  uint64 `json:"max-call-log-bytes"`
+			MaxResponseBytes uint64 `json:"max-response-bytes"`
+			MaxRounds        uint64 `json:"max-rounds"`
+		} `json:"query"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("%s: decode: %w", path, err)
 	}
-	return &domain.SimulateLimits{MaxTxnGroups: raw.MaxTxnGroups, MaxRounds: raw.MaxRounds,
+	lim := &domain.SimulateLimits{MaxTxnGroups: raw.MaxTxnGroups, MaxRounds: raw.MaxRounds,
 		MaxExtraOpcodeBudget: raw.MaxExtraOpcodeBudget, ResourceLimitMultiplier: raw.ResourceLimitMultiplier,
-		TimeLimitSeconds: raw.TimeLimitSeconds}, nil
+		TimeLimitSeconds: raw.TimeLimitSeconds}
+	if q := raw.Query; q != nil {
+		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
+			MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
+	}
+	return lim, nil
 }
 
 // BoxNames implements ports.AlgodClient.

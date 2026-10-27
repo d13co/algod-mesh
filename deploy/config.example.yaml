@@ -34,7 +34,8 @@ local:
   #   follow_mode: false
   #   time_travel: true                 # EnableTimeTravel node: serves ?round= and /versions at any past round
   #   holders_index: true               # TimeTravelHoldersIndex node: serves /v2/assets/{id}/holders; implies time_travel
-  #   simulate: { max_txn_groups: 16, max_rounds: 16, max_extra_opcode_budget: 320000, resource_limit_multiplier: 1, time_limit_seconds: 59 }  # dtalgorand simulate limits; read from the node unless set
+  #   simulate: { max_txn_groups: 16, max_rounds: 16, max_extra_opcode_budget: 320000, resource_limit_multiplier: 1, time_limit_seconds: 59,  # dtalgorand simulate limits; read from the node unless set
+  #               query: { max_calls: 1024, max_call_budget: 320000, max_call_log_bytes: 65536, max_response_bytes: 67108864, max_rounds: 16 } }  # POST /v2/query limits; unset: no queries
 
 registry:
   type: algorand                      # algorand | static | file | memory; default: algorand with app_id, file with file, else static
@@ -119,8 +120,8 @@ routing:
 #   ipv6_prefix: 64                   # IPv6 clients share one allowance per prefix of this length; default 64
 #   max_keys: 200000                  # clients tracked at most, then new anonymous ones share one allowance; default 200000
 #   anonymous_plan: free              # plan of requests without a token; "" answers them 401; default free when there is such a plan
-#   simulate_per_second: 20           # credits a simulation costs per second while it runs, on top of its weight; default 20
-#   weights:                          # credits per request, by kind; a simulation's weight counts once per group and round
+#   simulate_per_second: 20           # credits a simulation or query costs per second while it runs, on top of its weight; default 20
+#   weights:                          # credits per request, by kind; a simulation's weight counts once per group and round, a query's once per call and round
 #     default: 1
 #     round: 1                        # a request for one round (blocks, deltas, ...)
 #     timetravel: 2                   # state at a past round (?round=)
@@ -128,6 +129,7 @@ routing:
 #     deltas_history: 50              # a state delta re-evaluated from the history
 #     holders: 10                     # a page of an asset's holders (/v2/assets/{id}/holders)
 #     simulate: 5
+#     query: 0.25                     # POST /v2/query; TODO(review): placeholder, not benchmarked
 #     broadcast: 1
 #     pending: 1
 #     wait: 1
@@ -149,6 +151,10 @@ routing:
 #         max_extra_opcode_budget: 320000
 #         unnamed_resources: true     # allow-unnamed-resources; default true
 #         exec_trace: false           # exec-trace-config; default true
+#       query:                        # what one POST /v2/query may ask for (403 beyond); 0: no cap; TODO(review): example values, not tuned
+#         max_calls: 64
+#         max_rounds: 1
+#         max_budget: 320000          # with a cap, a query must set its budget
 #     pro:
 #       per_minute: 6000
 #       per_day: 5000000

@@ -35,6 +35,8 @@ type Options struct {
 	Version      string
 	// Simulate makes the node a dtalgorand that reports these limits at
 	// GET /v2/transactions/simulate/limits; nil is a stock algod (404).
+	// With Query.MaxCalls set it answers POST /v2/query too; without, that
+	// is a 404.
 	Simulate *domain.SimulateLimits
 }
 
@@ -150,7 +152,7 @@ func (n *Node) SetFailing(f bool) {
 	n.mu.Unlock()
 }
 
-// SetSimulate makes each simulate request run for delay, stopping early
+// SetSimulate makes each simulate request and query run for delay, stopping early
 // when its client goes as dtalgorand does, then answer status (0: as any
 // request) with Retry-After when retryAfter > 0.
 func (n *Node) SetSimulate(delay time.Duration, status, retryAfter int) {
@@ -362,16 +364,24 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		n.mu.Unlock()
 		writeJSON(w, 200, map[string]string{"txId": id})
 	case p == "/v2/transactions/simulate" && r.Method == "POST" && n.simulating(w, r):
+	case p == "/v2/query" && (n.opts.Simulate == nil || n.opts.Simulate.Query.MaxCalls == 0):
+		writeJSON(w, 404, map[string]string{"message": "Not Found"})
+	case p == "/v2/query" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/transactions/simulate/limits" && r.Method == "GET":
 		l := n.opts.Simulate
 		if l == nil {
 			writeJSON(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
+		reply := map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
 			"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier,
 			"time-limit-seconds": l.TimeLimitSeconds,
-			"time-travel":        n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI})
+			"time-travel":        n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI}
+		if q := l.Query; q.MaxCalls > 0 {
+			reply["query"] = map[string]any{"max-calls": q.MaxCalls, "max-call-budget": q.MaxCallBudget,
+				"max-call-log-bytes": q.MaxCallLogBytes, "max-response-bytes": q.MaxResponseBytes, "max-rounds": q.MaxRounds}
+		}
+		writeJSON(w, 200, reply)
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
 		tx, ok := n.pool[seg(3)]
@@ -423,7 +433,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// simulating runs a simulate request as SetSimulate says; false leaves the
+// simulating runs a simulate request or query as SetSimulate says; false leaves the
 // answer to the generic handler.
 func (n *Node) simulating(w http.ResponseWriter, r *http.Request) bool {
 	n.mu.Lock()

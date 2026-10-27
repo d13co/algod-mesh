@@ -32,7 +32,7 @@ Point your apps, indexers and bots at the agent instead of at algod. They keep u
 - **Drop-in algod API.** Clients send the same requests and the same `X-Algo-API-Token` they send to algod. CORS headers match algod's, so browser dApps work too.
 - **Two routing modes.** `fallback` serves from the local node and moves away only when it can't answer; `loadbalancer` spreads requests across the fleet by measured latency, error rate, lag and load.
 - **Capability-aware routing.** Each agent reads its node's data directory and advertises what the node can do: archival window (measured, not just taken from config), developer API (`/v2/teal/*`), follow mode, and time travel. Each request goes only to nodes that can answer it.
-- **Round-aware routing.** A request for a specific round (a block, a delta, a box listing or a simulation at a round, state at a past round) goes only to a node that still holds that round.
+- **Round-aware routing.** A request for a specific round (a block, a delta, a box listing, a simulation or a query at a round, state at a past round) goes only to a node that still holds that round.
 - **Sync tracking with no polling.** Each agent follows its own node with one `wait-for-block-after` long-poll and pushes a signed UDP heartbeat to its peers every round. Agents never poll each other's nodes, so a new round reaches the whole fleet in milliseconds.
 - **Retries and failover.** A request whose upstream fails without answering (connection error, 502/503/504) is retried on the next eligible node, then on an external RPC, within a single deadline. An answer from algod, such as a rejected transaction, goes back to the client and is never retried. Circuit breakers and 429 back-off keep traffic away from a node that is failing.
 - **External RPCs as a last resort.** Public endpoints such as Nodely are used only when nothing in your fleet can serve a request. They are not polled in the background.
@@ -300,7 +300,7 @@ A node built from the time-travel fork (`EnableTimeTravel` in `config.json`) kee
 |---|---|---|
 | account, asset, app, box or supply state with `?round=`, and `.../versions` histories | never (it ignores `round` and returns the latest state) | any round |
 | block header `?header-only=true` | its block window (archival: all; otherwise ~1000 rounds) | any round |
-| box listing with `?round=`, simulate with `"round"` in the body | its account-state lookback (`MaxAcctLookback`, a few rounds) | any round |
+| box listing with `?round=`, simulate with `"round"` in the body, a query's `rounds` | its account-state lookback (`MaxAcctLookback`, a few rounds) | any round |
 | state delta `/v2/deltas/{round}` | its account-state lookback, minus the oldest round | its block window |
 | full block, block hash, state proof | its block window | its block window |
 
@@ -329,6 +329,21 @@ Simulate requests have their own latency bucket (`class="simulate"` in metrics),
 
 Two answers from dtalgorand get special handling. A 503 with `Retry-After` to a simulation or a state delta means the node's slots for them are full: the request goes to another node, and that node gets no simulations or deltas until `Retry-After` passes (10 seconds at most), while it keeps serving everything else. It does not count against the node's breaker. When every node tried was busy or failed, and at least one was busy, the client gets the 503 with `Retry-After`. A 504 to a simulation, a history page (`/versions`) or a state delta means it ran past the node's time limit (`time-limit-seconds` in the limits). It goes to the client as it is, because the next node would only run it as long, and it does not count against the node either. The agent logs a warning when its node's time limit is not below `routing.upstream_timeout`: the agent would give up first, and the client would get the agent's 504 rather than the node's.
 
+### dtalgorand queries
+
+dtalgorand answers `POST /v2/query`: one TEAL program (or a deployed `app-id`) run as many read-only calls, each alone, at one or more rounds, without signatures, fees or a block. Stock algod and dtalgorand from before it don't have the route. A node that has it says so in the limits response's `query` object (`max-calls`, `max-call-budget`, `max-call-log-bytes`, `max-response-bytes`, `max-rounds`), which the agent reads with the simulate limits and advertises in its heartbeats. `local.overrides.simulate.query` and `tiers.external.capabilities.simulate.query` pin them, with `max_calls` 0 or unset for none.
+
+The router reads the body (msgpack, then JSON) and sends a query only to a node with queries whose limits cover it:
+- its number of `calls` within `max-calls`, its `rounds` entries within `max-rounds`, and its `budget` within `max-call-budget`;
+- `protocol: future` to a node with the developer API;
+- its `rounds` held as a simulation's `rounds` are: its earliest round within the node's window (any round on a time-travel node, the account-state lookback on a stock one) and its latest at or below the node's last round. No rounds, or a 0 entry, is the node's own latest round, so the node must be in sync.
+
+A body the router can't read still goes to a node with queries, which rejects it with its own message. When a node that fits is only out for now, the client gets a 503 to retry. When no node could ever fit, the router drops the `rounds` coverage first (the node reports a round it cannot read in that round's result), then the limits (the node answers 400 naming the one exceeded), and last the need for queries at all, so that in a fleet without them algod answers 404 as it does alone (`mesh_query_relaxed` counts these).
+
+The fleet's `GET /v2/transactions/simulate/limits` carries a `query` object when an eligible node has queries. It is one node's, picked apart from the simulate limits because a query is routed apart from a simulation: the node with the most `max-calls`, then `max-rounds`, `max-call-budget`, time travel and its id.
+
+Queries take the node's simulate slots, so they are handled as simulations are: their own latency bucket (`class="query"`), a 503 with `Retry-After` passes the node over for simulations, queries and deltas for a while, a 504 past the node's time limit goes to the client as it is, and a query that times out at one node is not run again on the next.
+
 ### dtalgorand asset holders
 
 dtalgorand with `TimeTravelHoldersIndex` answers `GET /v2/assets/{asset-id}/holders`: the accounts that hold an asset, at the latest round or at any past round with `?round=`. Stock algod and dtalgorand without the option don't have the route, so the router sends holders pages only to nodes that enable it. The agent reads the option from its node's `config.json` (it counts only with `EnableTimeTravel`) and advertises it in its heartbeats. To declare it on a node the agent can't inspect, set `holders_index: true` under `local.overrides`, `tiers.external[].capabilities`, or a static record's `declared`; it implies `time_travel`.
@@ -352,18 +367,19 @@ With `ratelimit.enabled`, the agent limits each client by its own allowance. Thi
 
 **Credits.**
 - Each plan has two allowances: `per_minute` and `per_day` credits. Each refills steadily, so a client that stops is back to the full minute's allowance after a minute and to the full day's after 24 hours.
-- A request costs the `weights` of its kind: `default`, `round`, `timetravel` (state at a past round), `versions` (an object history page), `deltas_history` (a state delta re-evaluated from the history), `holders` (a page of an asset's holders), `simulate`, `broadcast`, `pending`, `wait` and `teal`.
-- A simulation costs its weight once per transaction group and per round it asks for. It is charged up front, before anything is forwarded.
+- A request costs the `weights` of its kind: `default`, `round`, `timetravel` (state at a past round), `versions` (an object history page), `deltas_history` (a state delta re-evaluated from the history), `holders` (a page of an asset's holders), `simulate`, `query`, `broadcast`, `pending`, `wait` and `teal`.
+- A simulation costs its weight once per transaction group and per round it asks for, and a query (`POST /v2/query`) its weight once per call and per round (0.25 by default, so 16 calls cost 4 credits a round). It is charged up front, before anything is forwarded.
 - When either allowance cannot cover a request, the client gets 429 with `Retry-After`.
 - Every answer carries `RateLimit-Policy` and `RateLimit` (the IETF httpapi draft headers) for the plan's windows, and `X-Algod-Mesh-Cost` with what the request cost.
 
-**Simulations.**
+**Simulations and queries.**
 - A plan's `simulate` caps bound what one request may ask for: `max_groups`, `max_rounds`, `max_extra_opcode_budget`, and whether `allow-unnamed-resources` and `exec-trace-config` are allowed. A request beyond them gets 403, as does one that costs more than a whole allowance, because waiting would not help.
-- While a simulation runs it also costs `simulate_per_second`. If that leaves the client's allowance below zero, every simulation the client has running is cancelled. The node sees the request end and stops (dtalgorand), and the client gets 429.
+- A plan's `query` caps bound one query the same way: `max_calls`, `max_rounds` and `max_budget`. With `max_budget`, a query must set its `budget`, since without one the node runs each call with its own `max-call-budget`.
+- What follows holds for queries as for simulations. While a simulation runs it also costs `simulate_per_second`. If that leaves the client's allowance below zero, every simulation the client has running is cancelled. The node sees the request end and stops (dtalgorand), and the client gets 429.
 - Once the node starts answering, its work is done: the meter stops and the request is no longer cancelled.
 - What a simulation ran up is billed in full, so an allowance can go into debt. The client then waits for it to refill.
 
-**Billing by the node's own figures.** With dtalgorand's `EnableEffortHeader`, the node reports the work it did for each simulation, history page, state delta and `?round=` read in `X-Algod-Effort`. Such a request costs its weight (for a simulation, already scaled by its groups and rounds) plus that work at the `effort` rates, in place of `simulate_per_second`. Then the same request costs the same on fast and slow hardware.
+**Billing by the node's own figures.** With dtalgorand's `EnableEffortHeader`, the node reports the work it did for each simulation, query, history page, state delta and `?round=` read in `X-Algod-Effort`. Such a request costs its weight (for a simulation or query, already scaled by its groups or calls and rounds) plus that work at the `effort` rates, in place of `simulate_per_second`. Then the same request costs the same on fast and slow hardware.
 - The rates are units of work per credit: `opcodes_per_credit`, `lookups_per_credit`, `history_per_credit` (reads that went to the time-travel store, on top of their lookup), `scanned_per_credit` (entries a history page or `?round=` list visited) and `response_kb_per_credit` (the size of the answer before compression, as execution traces and logs make it grow; a `?round=` read reports 0). 0 makes that work free.
 - The wall-time meter still runs while the node works, so a client that runs out is still cut off. Once the node answers, its figures replace the time.
 - Only mesh nodes are believed, other operators' included, so join a mesh only with operators you trust to report honestly; an external's header is dropped. A billed client gets the cost in credits, not the node's figures. The admin token sees them as the node sent them, which helps when setting the rates, and so does every client while `ratelimit` is off.

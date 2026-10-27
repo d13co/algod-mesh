@@ -138,6 +138,7 @@ func limiterOptions(r config.RateLimit) *app.LimiterOptions {
 				MaxExtraOpcodeBudget: p.Simulate.MaxExtraOpcodeBudget,
 				DenyUnnamedResources: p.Simulate.UnnamedResources != nil && !*p.Simulate.UnnamedResources,
 				DenyExecTrace:        p.Simulate.ExecTrace != nil && !*p.Simulate.ExecTrace},
+			Query: domain.QueryCaps{MaxCalls: p.Query.MaxCalls, MaxRounds: p.Query.MaxRounds, MaxBudget: p.Query.MaxBudget},
 		}
 	}
 	for _, t := range r.Tokens {

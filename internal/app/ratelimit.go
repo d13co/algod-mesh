@@ -43,8 +43,8 @@ type LimiterOptions struct {
 	Tokens        []LimitToken
 	AnonymousPlan string // the plan of requests without a token; "" refuses them
 	Weights       domain.CostWeights
-	// SimulatePerSecond is what a simulation costs per second while it runs,
-	// on top of its base cost.
+	// SimulatePerSecond is what a simulation or query costs per second while
+	// it runs, on top of its base cost.
 	SimulatePerSecond float64
 	// Effort prices the work a mesh node reports (domain.EffortHeader). A
 	// request it reports for is billed base + that, in place of the
@@ -91,7 +91,7 @@ type Identity struct {
 // Limiter holds every client's allowance: two token buckets of credits per
 // client, one refilled over a minute and one over a day. A request is
 // charged its base cost up front and refused with 429 when either bucket
-// lacks it. A simulation is also metered while it runs, and cancelled once
+// lacks it. A simulation or query is also metered while it runs, and cancelled once
 // what it has run up leaves either bucket overdrawn. When the node that
 // answers reports the work it did, that is billed instead of the time.
 type Limiter struct {
@@ -230,14 +230,20 @@ func (d *Denial) Write(w http.ResponseWriter) {
 func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*Ticket, *Denial) {
 	plan := l.plans[id.Plan]
 	costKey := domain.CostKey(class, best)
-	// A simulate body the router could not read cannot be held to the
-	// caps; algod would reject it anyway. It is still charged below.
-	unreadable := class.Simulate && class.SimNeeds == nil && plan.Simulate != (domain.SimulateCaps{})
-	if class.Simulate && class.SimNeeds != nil {
-		if msg := plan.Simulate.Check(*class.SimNeeds); msg != "" {
-			l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
-			return nil, &Denial{Status: http.StatusForbidden, Message: "algod-mesh: " + msg}
-		}
+	// A simulate or query body the router could not read cannot be held to
+	// the caps; algod would reject it anyway. It is still charged below.
+	unreadable := (class.Simulate && class.SimNeeds == nil && plan.Simulate != (domain.SimulateCaps{})) ||
+		(class.Query && class.QueryNeeds == nil && plan.Query != (domain.QueryCaps{}))
+	var capped string
+	switch {
+	case class.Simulate && class.SimNeeds != nil:
+		capped = plan.Simulate.Check(*class.SimNeeds)
+	case class.Query && class.QueryNeeds != nil:
+		capped = plan.Query.Check(*class.QueryNeeds)
+	}
+	if capped != "" {
+		l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
+		return nil, &Denial{Status: http.StatusForbidden, Message: "algod-mesh: " + capped}
 	}
 	cost := l.opts.Weights.Base(class, best)
 	for _, w := range []struct {
@@ -263,9 +269,9 @@ func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*T
 	k.charge(cost)
 	if unreadable {
 		l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")
-		return nil, &Denial{Status: http.StatusBadRequest, Header: k.header(), Message: "algod-mesh: cannot read the simulate request"}
+		return nil, &Denial{Status: http.StatusBadRequest, Header: k.header(), Message: "algod-mesh: cannot read the request body"}
 	}
-	t := &Ticket{l: l, k: k, costKey: costKey, base: cost, metered: class.Simulate, start: now}
+	t := &Ticket{l: l, k: k, costKey: costKey, base: cost, metered: class.Evaluates(), start: now}
 	// Every request in flight keeps its key: one billed by effort is charged
 	// at Done, and a key swept before then would lose the charge.
 	k.flights[t] = struct{}{}
@@ -499,7 +505,7 @@ func (t *Ticket) Exhausted() *Denial {
 	t.k.refill(l.clock.Now())
 	wait, _ := t.k.shortfall(t.base)
 	return &Denial{Status: http.StatusTooManyRequests, RetryAfter: max(wait, time.Second), Header: t.k.header(),
-		Message: "algod-mesh: rate limit exceeded: the allowance ran out during the simulation"}
+		Message: "algod-mesh: rate limit exceeded: the allowance ran out while the request ran"}
 }
 
 // meter is what the request has run up by now; l.mu is held.

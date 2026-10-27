@@ -132,6 +132,21 @@ type SimulateLimits struct {
 	// TimeLimitSeconds caps one request's run time (504, or per-round errors
 	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
 	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
+	// Query is what the node allows in a POST /v2/query request, the limits
+	// response's query object. The zero value is a node without the
+	// endpoint: a stock algod, a dtalgorand from before it, or one with
+	// MaxAPIQueryCalls 0.
+	Query QueryLimits `json:"query,omitzero" yaml:"query,omitempty"`
+}
+
+// QueryLimits is what a dtalgorand node allows in one POST /v2/query
+// request. The fields mirror the limits response's query object.
+type QueryLimits struct {
+	MaxCalls         uint64 `json:"max_calls" yaml:"max_calls"` // 0: the node has no queries
+	MaxCallBudget    uint64 `json:"max_call_budget" yaml:"max_call_budget"`
+	MaxCallLogBytes  uint64 `json:"max_call_log_bytes,omitempty" yaml:"max_call_log_bytes,omitempty"` // 0: the protocol's
+	MaxResponseBytes uint64 `json:"max_response_bytes,omitempty" yaml:"max_response_bytes,omitempty"` // 0: no limit
+	MaxRounds        uint64 `json:"max_rounds" yaml:"max_rounds"`
 }
 
 // StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod
@@ -149,6 +164,7 @@ const (
 	maxSimulateRounds          = 256
 	maxExtraOpcodeBudget       = 1000 * StockMaxExtraOpcodeBudget
 	maxResourceLimitMultiplier = 1024
+	maxQueryRounds             = 256 // simulation.MaxQueryRounds
 )
 
 // SimulateLimits is what the node allows in a simulate request, with the
@@ -169,6 +185,31 @@ func (c Capabilities) SimulateLimits() SimulateLimits {
 	}
 	l.MaxExtraOpcodeBudget = min(l.MaxExtraOpcodeBudget, maxExtraOpcodeBudget)
 	l.ResourceLimitMultiplier = min(max(l.ResourceLimitMultiplier, 1), maxResourceLimitMultiplier)
+	l.Query = l.Query.clamped()
+	return l
+}
+
+// Queries reports whether the node answers POST /v2/query.
+func (c Capabilities) Queries() bool { return c.Simulate != nil && c.Simulate.Query.MaxCalls > 0 }
+
+// QueryLimits is what the node allows in a query request, the zero value
+// for a node without queries.
+func (c Capabilities) QueryLimits() QueryLimits {
+	if c.Simulate == nil {
+		return QueryLimits{}
+	}
+	return c.Simulate.Query.clamped()
+}
+
+// clamped reads the limits as dtalgorand reads its config
+// (simulation.QueryLimitsFromConfig): a call budget of at least one and at
+// most the fork's ceiling, and between one and maxQueryRounds rounds.
+func (l QueryLimits) clamped() QueryLimits {
+	if l.MaxCalls == 0 {
+		return QueryLimits{}
+	}
+	l.MaxCallBudget = min(max(l.MaxCallBudget, 1), maxExtraOpcodeBudget)
+	l.MaxRounds = min(max(l.MaxRounds, 1), maxQueryRounds)
 	return l
 }
 

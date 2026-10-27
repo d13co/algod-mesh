@@ -57,6 +57,13 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	if lim, err := New(dt.URL(), dt.Token(), nil).SimulateLimits(ctx); err != nil || lim == nil || *lim != want {
 		t.Fatalf("dtalgorand simulate limits: %v %+v", err, lim)
 	}
+	withQuery := want
+	withQuery.Query = domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+	dq := fakealgod.New(fakealgod.Options{ID: "dq", StartRound: 5, Simulate: &withQuery})
+	defer dq.Close()
+	if lim, err := New(dq.URL(), dq.Token(), nil).SimulateLimits(ctx); err != nil || lim == nil || *lim != withQuery {
+		t.Fatalf("dtalgorand query limits: %v %+v", err, lim)
+	}
 	bad := New(n.URL(), "wrong", nil)
 	if _, err := bad.Status(ctx); err == nil {
 		t.Fatal("wrong token must fail")

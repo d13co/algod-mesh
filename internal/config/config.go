@@ -86,11 +86,20 @@ func (r RateLimit) EffortRatesOf() domain.EffortRates {
 }
 
 // RatePlan is one plan's allowance: credits per minute and per day, 0 for
-// no limit, and what one simulate request may ask for.
+// no limit, and what one simulate or query request may ask for.
 type RatePlan struct {
 	PerMinute float64      `yaml:"per_minute"`
 	PerDay    float64      `yaml:"per_day"`
 	Simulate  SimulateCaps `yaml:"simulate"`
+	Query     QueryCaps    `yaml:"query"`
+}
+
+// QueryCaps bounds one POST /v2/query request; 0 is no cap. With
+// max_budget, a query must set its budget.
+type QueryCaps struct {
+	MaxCalls  int    `yaml:"max_calls"`
+	MaxRounds int    `yaml:"max_rounds"`
+	MaxBudget uint64 `yaml:"max_budget"`
 }
 
 // SimulateCaps bounds one simulate request; 0 is no cap, and the options are
@@ -156,6 +165,8 @@ func (r *RateLimit) finish(clientToken, adminToken string) error {
 			return fmt.Errorf("ratelimit.plans.%s: per_minute and per_day must not be negative (0 is unlimited)", name)
 		case p.Simulate.MaxGroups < 0 || p.Simulate.MaxRounds < 0:
 			return fmt.Errorf("ratelimit.plans.%s.simulate: caps must not be negative", name)
+		case p.Query.MaxCalls < 0 || p.Query.MaxRounds < 0:
+			return fmt.Errorf("ratelimit.plans.%s.query: caps must not be negative", name)
 		}
 	}
 	weights := map[string]float64{}
