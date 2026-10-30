@@ -13,12 +13,22 @@ func simClass(b SimulateBody) RequestClass {
 	return c
 }
 
-func TestClassifySimulateLimits(t *testing.T) {
-	if c := Classify("GET", "/v2/transactions/simulate/limits", ""); !c.SimulateLimits || c.Simulate || !c.Idempotent {
-		t.Fatalf("limits: %+v", c)
+func TestClassifyCapabilities(t *testing.T) {
+	if c := Classify("GET", "/v2/capabilities", ""); !c.Capabilities || c.Simulate || !c.Idempotent {
+		t.Fatalf("capabilities: %+v", c)
 	}
-	if c := Classify("POST", "/v2/transactions/simulate/limits", ""); c.SimulateLimits || c.Simulate {
-		t.Fatalf("POST limits is no limits request: %+v", c)
+	if c := Classify("POST", "/v2/capabilities", ""); c.Capabilities || c.Simulate {
+		t.Fatalf("POST capabilities is no capabilities request: %+v", c)
+	}
+	if c := Classify("GET", "/v2/capabilities/x", ""); c.Capabilities {
+		t.Fatalf("a subpath is no capabilities request: %+v", c)
+	}
+	// The limits' old path is an unknown path now, neither the fleet's
+	// answer nor a simulation.
+	for _, m := range []string{"GET", "POST"} {
+		if c := Classify(m, "/v2/transactions/simulate/limits", ""); c.Capabilities || c.Simulate {
+			t.Fatalf("%s old limits path: %+v", m, c)
+		}
 	}
 }
 
@@ -141,7 +151,7 @@ func TestRelaxed(t *testing.T) {
 	}
 }
 
-func TestFleetSimulateLimits(t *testing.T) {
+func TestFleetCapabilities(t *testing.T) {
 	small := SimulateLimits{MaxTxnGroups: 4, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 8}
 	us := []Upstream{
 		{ID: "stock", Health: HealthSynced, LastRound: 100},
@@ -152,16 +162,18 @@ func TestFleetSimulateLimits(t *testing.T) {
 	// dt allows more groups, small more rounds: the answer is dt's alone,
 	// not small's rounds with dt's groups, which no node runs together.
 	// The multiplier is the smallest, the stock node's.
-	got, ok := FleetSimulateLimits(us, 100, 2)
-	want := FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1, TimeTravel: true}
+	got, ok := FleetCapabilities(us, 100, 2)
+	want := FleetCapabilitiesReply{TimeTravel: true,
+		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1}}
 	if !ok || got != want {
 		t.Fatalf("fleet limits %+v %v, want %+v", got, ok, want)
 	}
 	// A node at least as large everywhere wins whatever the order.
 	big := SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 8}
 	more := append([]Upstream{{ID: "big", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &big, TimeTravel: true, DeveloperAPI: true}}}, us[1:]...)
-	got, _ = FleetSimulateLimits(more, 100, 2)
-	want = FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 4, TimeTravel: true, DeveloperAPI: true}
+	got, _ = FleetCapabilities(more, 100, 2)
+	want = FleetCapabilitiesReply{TimeTravel: true, DeveloperAPI: true,
+		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 4}}
 	if got != want {
 		t.Fatalf("dominant node: %+v, want %+v", got, want)
 	}
@@ -170,13 +182,13 @@ func TestFleetSimulateLimits(t *testing.T) {
 		{ID: "a", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small}},
 		{ID: "b", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small, TimeTravel: true}},
 	}
-	if got, _ := FleetSimulateLimits(tied, 100, 2); !got.TimeTravel {
+	if got, _ := FleetCapabilities(tied, 100, 2); !got.TimeTravel {
 		t.Fatalf("tie: %+v", got)
 	}
-	if _, ok := FleetSimulateLimits(us[:1], 100, 2); ok {
+	if _, ok := FleetCapabilities(us[:1], 100, 2); ok {
 		t.Fatal("a fleet of stock nodes reported limits")
 	}
-	if _, ok := FleetSimulateLimits(us[3:], 100, 2); ok {
+	if _, ok := FleetCapabilities(us[3:], 100, 2); ok {
 		t.Fatal("an unreachable node's limits counted")
 	}
 }

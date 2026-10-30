@@ -247,7 +247,7 @@ func checkNodeCmd(args []string) error {
 	if v, err := client.Versions(ctx); err == nil {
 		report["algod_version"] = v.Build
 	}
-	if lim, err := client.SimulateLimits(ctx); err == nil && lim != nil {
+	if lim, err := client.Capabilities(ctx); err == nil && lim != nil {
 		report["simulate_limits"] = lim
 	}
 	if *probe {
