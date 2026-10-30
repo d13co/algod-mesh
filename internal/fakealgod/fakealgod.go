@@ -34,7 +34,7 @@ type Options struct {
 	HoldersIndex bool // TimeTravelHoldersIndex, for ConfigReader
 	Version      string
 	// Simulate makes the node a dtalgorand that reports these limits at
-	// GET /v2/transactions/simulate/limits; nil is a stock algod (404).
+	// GET /v2/capabilities; nil is a stock algod (404).
 	// With Query.MaxCalls set it answers POST /v2/query too; without, that
 	// is a 404.
 	Simulate *domain.SimulateLimits
@@ -367,16 +367,16 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	case p == "/v2/query" && (n.opts.Simulate == nil || n.opts.Simulate.Query.MaxCalls == 0):
 		writeJSON(w, 404, map[string]string{"message": "Not Found"})
 	case p == "/v2/query" && r.Method == "POST" && n.simulating(w, r):
-	case p == "/v2/transactions/simulate/limits" && r.Method == "GET":
+	case p == "/v2/capabilities" && r.Method == "GET":
 		l := n.opts.Simulate
 		if l == nil {
 			writeJSON(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
-		reply := map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
-			"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier,
+		reply := map[string]any{"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI,
 			"time-limit-seconds": l.TimeLimitSeconds,
-			"time-travel":        n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI}
+			"simulate": map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
+				"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier}}
 		if q := l.Query; q.MaxCalls > 0 {
 			reply["query"] = map[string]any{"max-calls": q.MaxCalls, "max-call-budget": q.MaxCallBudget,
 				"max-call-log-bytes": q.MaxCallLogBytes, "max-response-bytes": q.MaxResponseBytes, "max-rounds": q.MaxRounds}

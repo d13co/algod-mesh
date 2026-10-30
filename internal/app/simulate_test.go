@@ -162,33 +162,58 @@ func TestSimulateRoundsNeedEveryRound(t *testing.T) {
 	}
 }
 
-// The router answers the limits for the fleet: what a request sent to it can
-// ask for, since it routes each request to a node that allows it.
-func TestSimulateLimitsForFleet(t *testing.T) {
+// The router answers the capabilities for the fleet: what a request sent to
+// it can ask for, since it routes each request to a node that allows it.
+func TestCapabilitiesForFleet(t *testing.T) {
 	f := newSimFleet(t, domain.Capabilities{Simulate: &testLimits, TimeTravel: true})
-	rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil)
+	rec := f.do(http.MethodGet, "/v2/capabilities", nil)
 	if rec.Code != 200 {
-		t.Fatalf("limits: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("capabilities: %d %s", rec.Code, rec.Body.String())
 	}
-	var got domain.FleetSimulateLimitsReply
+	var got domain.FleetCapabilitiesReply
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := domain.FleetSimulateLimitsReply{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1, TimeTravel: true, TimeLimitSeconds: 30}
+	want := domain.FleetCapabilitiesReply{TimeTravel: true, TimeLimitSeconds: 30,
+		Simulate: domain.FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1}}
 	if got != want {
-		t.Fatalf("limits %+v, want %+v", got, want)
+		t.Fatalf("capabilities %+v, want %+v", got, want)
 	}
-	if n := f.b.Hits("/v2/transactions/simulate/limits") + f.c.Hits("/v2/transactions/simulate/limits"); n != 0 {
-		t.Fatalf("limits forwarded %d times", n)
+	// dtalgorand's own form: the simulate limits nested, no query object
+	// without a node that has queries.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["max-txn-groups"]; ok || raw["simulate"] == nil || raw["query"] != nil {
+		t.Fatalf("capabilities shape: %s", rec.Body.String())
+	}
+	if n := f.b.Hits("/v2/capabilities") + f.c.Hits("/v2/capabilities"); n != 0 {
+		t.Fatalf("capabilities forwarded %d times", n)
 	}
 }
 
-// A fleet of stock algods has no limits endpoint, and the mesh has none
-// either: the request is forwarded and answered 404.
-func TestSimulateLimitsForwardedWithoutDtalgorand(t *testing.T) {
+// The limits' old path is gone from dtalgorand: the router does not answer
+// it, and forwards it as any other path, for the node's own answer (a 404
+// from dtalgorand; the fake echoes it).
+func TestOldSimulateLimitsPathForwarded(t *testing.T) {
+	f := newSimFleet(t, domain.Capabilities{Simulate: &testLimits, TimeTravel: true})
+	rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil)
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got["node"] == nil || got["simulate"] != nil {
+		t.Fatalf("old limits path not the node's answer: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := f.b.Hits("/v2/transactions/simulate/limits") + f.c.Hits("/v2/transactions/simulate/limits"); n != 1 {
+		t.Fatalf("old limits path forwarded %d times, want once", n)
+	}
+}
+
+// A fleet of stock algods has no capabilities endpoint, and the mesh has
+// none either: the request is forwarded and answered 404.
+func TestCapabilitiesForwardedWithoutDtalgorand(t *testing.T) {
 	f := newSimFleet(t, domain.Capabilities{})
-	if rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil); rec.Code != 404 {
-		t.Fatalf("limits on a stock fleet: %d %s", rec.Code, rec.Body.String())
+	if rec := f.do(http.MethodGet, "/v2/capabilities", nil); rec.Code != 404 {
+		t.Fatalf("capabilities on a stock fleet: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -225,9 +250,9 @@ func TestSimulateNotRelaxedWhileFittingNodeIsOut(t *testing.T) {
 	if n := f.b.Hits("/v2/transactions/simulate"); n != 0 {
 		t.Fatalf("stock node saw %d simulations", n)
 	}
-	// The limits are not the stock node's 404 either.
-	if rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil); rec.Code != 503 {
-		t.Fatalf("limits while the dtalgorand node drains: %d %s", rec.Code, rec.Body.String())
+	// The capabilities are not the stock node's 404 either.
+	if rec := f.do(http.MethodGet, "/v2/capabilities", nil); rec.Code != 503 {
+		t.Fatalf("capabilities while the dtalgorand node drains: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -246,15 +271,15 @@ func TestSimulateNotRetriedAfterTimeout(t *testing.T) {
 }
 
 // With the only dtalgorand node excluded, the fleet answers as a stock one:
-// the limits request is forwarded and gets algod's 404, and a time-travel
+// the capabilities request is forwarded and gets algod's 404, and a time-travel
 // request is told the fleet has no such node.
 func TestExcludedDtalgorandIsAbsent(t *testing.T) {
 	f := newSimFleetDir(t, domain.Capabilities{Simulate: &testLimits, TimeTravel: true},
 		RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1}, DirectoryOptions{Exclude: []string{"c"}})
-	if rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil); rec.Code != 404 {
-		t.Fatalf("limits with the dtalgorand node excluded: %d %s", rec.Code, rec.Body.String())
+	if rec := f.do(http.MethodGet, "/v2/capabilities", nil); rec.Code != 404 {
+		t.Fatalf("capabilities with the dtalgorand node excluded: %d %s", rec.Code, rec.Body.String())
 	}
-	if n := f.c.Hits("/v2/transactions/simulate/limits"); n != 0 {
+	if n := f.c.Hits("/v2/capabilities"); n != 0 {
 		t.Fatalf("excluded node hit %d times", n)
 	}
 	cands, _ := f.h.d.Snapshot()

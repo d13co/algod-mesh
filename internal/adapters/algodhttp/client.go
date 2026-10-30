@@ -134,10 +134,10 @@ func (c *Client) Versions(ctx context.Context) (ports.Versions, error) {
 		Build: fmt.Sprintf("%d.%d.%d-%s", raw.Build.Major, raw.Build.Minor, raw.Build.BuildNumber, raw.Build.Channel)}, nil
 }
 
-// SimulateLimits implements ports.AlgodClient. A 404 is a node without the
+// Capabilities implements ports.AlgodClient. A 404 is a node without the
 // endpoint: stock algod, or a dtalgorand from before it.
-func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, error) {
-	const path = "/v2/transactions/simulate/limits"
+func (c *Client) Capabilities(ctx context.Context) (*domain.SimulateLimits, error) {
+	const path = "/v2/capabilities"
 	code, body, err := c.get(ctx, path)
 	if err != nil {
 		return nil, err
@@ -148,12 +148,15 @@ func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, er
 	if code != 200 {
 		return nil, fmt.Errorf("%s: status %d: %s", path, code, truncate(body))
 	}
+	// time-travel and developer-api are read from the node's config instead.
 	var raw struct {
-		MaxTxnGroups            uint64 `json:"max-txn-groups"`
-		MaxRounds               uint64 `json:"max-rounds"`
-		MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
-		ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
-		TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
+		TimeLimitSeconds uint64 `json:"time-limit-seconds"`
+		Simulate         *struct {
+			MaxTxnGroups            uint64 `json:"max-txn-groups"`
+			MaxRounds               uint64 `json:"max-rounds"`
+			MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
+			ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
+		} `json:"simulate"`
 		// Absent on a node without POST /v2/query.
 		Query *struct {
 			MaxCalls         uint64 `json:"max-calls"`
@@ -166,8 +169,12 @@ func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, er
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("%s: decode: %w", path, err)
 	}
-	lim := &domain.SimulateLimits{MaxTxnGroups: raw.MaxTxnGroups, MaxRounds: raw.MaxRounds,
-		MaxExtraOpcodeBudget: raw.MaxExtraOpcodeBudget, ResourceLimitMultiplier: raw.ResourceLimitMultiplier,
+	if raw.Simulate == nil {
+		return nil, fmt.Errorf("%s: no simulate object: %s", path, truncate(body))
+	}
+	s := raw.Simulate
+	lim := &domain.SimulateLimits{MaxTxnGroups: s.MaxTxnGroups, MaxRounds: s.MaxRounds,
+		MaxExtraOpcodeBudget: s.MaxExtraOpcodeBudget, ResourceLimitMultiplier: s.ResourceLimitMultiplier,
 		TimeLimitSeconds: raw.TimeLimitSeconds}
 	if q := raw.Query; q != nil {
 		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,

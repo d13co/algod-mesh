@@ -64,7 +64,7 @@ type Capabilities struct {
 	// answers GET /v2/assets/{asset-id}/holders, once its index is built.
 	HoldersIndex bool `json:"holders_index,omitempty"`
 	// Simulate is what the node allows in a simulate request, as dtalgorand
-	// reports it at GET /v2/transactions/simulate/limits. nil is a stock
+	// reports it at GET /v2/capabilities. nil is a stock
 	// algod (or an agent too old to ask): one transaction group, no rounds
 	// list, the upstream opcode budget limit and none of the fork's options.
 	Simulate        *SimulateLimits `json:"simulate,omitempty"`
@@ -122,8 +122,9 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 }
 
 // SimulateLimits is what a dtalgorand node allows in one simulate request.
-// The fields mirror GET /v2/transactions/simulate/limits; that response's
-// time-travel and developer-api are already Capabilities of their own.
+// The fields mirror the simulate object of GET /v2/capabilities, with that
+// response's time-limit-seconds; its time-travel and developer-api are
+// already Capabilities of their own.
 type SimulateLimits struct {
 	MaxTxnGroups            uint64 `json:"max_txn_groups" yaml:"max_txn_groups"`
 	MaxRounds               uint64 `json:"max_rounds" yaml:"max_rounds"` // 0: rounds is disabled
@@ -132,15 +133,15 @@ type SimulateLimits struct {
 	// TimeLimitSeconds caps one request's run time (504, or per-round errors
 	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
 	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
-	// Query is what the node allows in a POST /v2/query request, the limits
-	// response's query object. The zero value is a node without the
+	// Query is what the node allows in a POST /v2/query request, the
+	// capabilities response's query object. The zero value is a node without the
 	// endpoint: a stock algod, a dtalgorand from before it, or one with
 	// MaxAPIQueryCalls 0.
 	Query QueryLimits `json:"query,omitzero" yaml:"query,omitempty"`
 }
 
 // QueryLimits is what a dtalgorand node allows in one POST /v2/query
-// request. The fields mirror the limits response's query object.
+// request. The fields mirror the capabilities response's query object.
 type QueryLimits struct {
 	MaxCalls         uint64 `json:"max_calls" yaml:"max_calls"` // 0: the node has no queries
 	MaxCallBudget    uint64 `json:"max_call_budget" yaml:"max_call_budget"`

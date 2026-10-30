@@ -166,7 +166,7 @@ func TestStatsBreaker(t *testing.T) {
 	}
 }
 
-func TestMonitorReadsSimulateLimits(t *testing.T) {
+func TestMonitorReadsCapabilities(t *testing.T) {
 	lim := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 1}
 	run := func(o fakealgod.Options, ov *domain.CapabilityOverrides) (*Monitor, *fakealgod.Node) {
 		n := fakealgod.New(o)
@@ -190,7 +190,7 @@ func TestMonitorReadsSimulateLimits(t *testing.T) {
 	if m.State().Caps.Simulate == nil {
 		t.Fatal("limits dropped on round update")
 	}
-	if hits := n.Hits("/v2/transactions/simulate/limits"); hits != 1 {
+	if hits := n.Hits("/v2/capabilities"); hits != 1 {
 		t.Fatalf("limits asked %d times, want once", hits)
 	}
 

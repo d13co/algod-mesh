@@ -174,20 +174,20 @@ func TestFleetQueryLimits(t *testing.T) {
 		{ID: "stock", Health: HealthSynced, LastRound: 100},
 		{ID: "noquery", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &dtLimits}},
 	}
-	got, ok := FleetSimulateLimits(us, 100, 2)
+	got, ok := FleetCapabilities(us, 100, 2)
 	if !ok || got.Query != nil {
 		t.Fatalf("no query node: %+v %v", got, ok)
 	}
 	us = append(us,
 		Upstream{ID: "small", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small}},
 		Upstream{ID: "dt", Health: HealthSynced, LastRound: 100, Caps: queryCaps()})
-	got, _ = FleetSimulateLimits(us, 100, 2)
+	got, _ = FleetCapabilities(us, 100, 2)
 	want := FleetQueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 64 << 20, MaxRounds: 16}
 	if got.Query == nil || *got.Query != want {
 		t.Fatalf("query limits %+v, want %+v (one node's, the most calls)", got.Query, want)
 	}
 	us[3].Health = HealthOffline
-	if got, _ = FleetSimulateLimits(us, 100, 2); got.Query == nil || got.Query.MaxCalls != 64 {
+	if got, _ = FleetCapabilities(us, 100, 2); got.Query == nil || got.Query.MaxCalls != 64 {
 		t.Fatalf("with dt down: %+v", got.Query)
 	}
 }

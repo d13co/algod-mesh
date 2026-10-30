@@ -34,9 +34,10 @@ type AlgodClient interface {
 	// HasBlock reports whether the node can serve the given round (cheap probe).
 	HasBlock(ctx context.Context, round uint64) (bool, error)
 	Versions(ctx context.Context) (Versions, error)
-	// SimulateLimits reads dtalgorand's GET /v2/transactions/simulate/limits:
-	// nil and no error for a node without the endpoint (stock algod).
-	SimulateLimits(ctx context.Context) (*domain.SimulateLimits, error)
+	// Capabilities reads the simulate and query limits from dtalgorand's
+	// GET /v2/capabilities: nil and no error for a node without the endpoint
+	// (stock algod).
+	Capabilities(ctx context.Context) (*domain.SimulateLimits, error)
 	// BoxNames lists the box keys of an application.
 	BoxNames(ctx context.Context, appID uint64) ([][]byte, error)
 	// Box returns a box value; ErrNotFound when absent.

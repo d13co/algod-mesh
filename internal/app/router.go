@@ -335,8 +335,8 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		}
 	}
 	w.Header().Set("X-Algod-Mesh-Mode", string(r.opts.Mode))
-	if class.SimulateLimits {
-		if lim, ok := domain.FleetSimulateLimits(cands, best, r.opts.SyncTolerance); ok {
+	if class.Capabilities {
+		if lim, ok := domain.FleetCapabilities(cands, best, r.opts.SyncTolerance); ok {
 			writeJSON(w, http.StatusOK, lim)
 			return
 		}

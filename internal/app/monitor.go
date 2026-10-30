@@ -486,7 +486,7 @@ func (m *Monitor) refreshLimits(ctx context.Context) {
 func (m *Monitor) simulateLimits(ctx context.Context) (*domain.SimulateLimits, error) {
 	ctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
 	defer cancel()
-	lim, err := m.algod.SimulateLimits(ctx)
+	lim, err := m.algod.Capabilities(ctx)
 	if err == nil && lim != nil && m.warnedTimeLimit.Swap(lim.TimeLimitSeconds) != lim.TimeLimitSeconds {
 		if limit := time.Duration(lim.TimeLimitSeconds) * time.Second; limit > 0 && m.opts.UpstreamTimeout > 0 && limit >= m.opts.UpstreamTimeout {
 			m.log.Warn("the node's simulate time limit is not below routing.upstream_timeout: the agent gives up on a long simulation first, and the client gets the agent's 504 instead of the node's",
