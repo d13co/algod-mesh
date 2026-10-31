@@ -201,3 +201,24 @@ func TestBoxesOther400PassedThrough(t *testing.T) {
 		t.Fatalf("other 400 retried (c %d) or marked b", f.c.Hits(boxList))
 	}
 }
+
+// The history is blamed only when a node held back for it would otherwise
+// serve the request: not for a box listing past every node's round.
+func TestUntrustedWouldServe(t *testing.T) {
+	untrusted := domain.Upstream{ID: "u", Health: domain.HealthSynced, LastRound: 100,
+		Caps: domain.Capabilities{TimeTravel: true, HistoryUntrusted: true, MaxAcctLookback: 4}}
+	for _, tc := range []struct {
+		round string
+		want  bool
+	}{{"50", true}, {"101", false}} {
+		class := domain.Classify(http.MethodGet, boxList, "round="+tc.round)
+		if got := untrustedWouldServe([]domain.Upstream{untrusted}, class, 100, 2); got != tc.want {
+			t.Errorf("round %s: %v, want %v", tc.round, got, tc.want)
+		}
+	}
+	trusted := untrusted
+	trusted.Caps.HistoryUntrusted = false
+	if untrustedWouldServe([]domain.Upstream{trusted}, domain.Classify(http.MethodGet, boxList, "round=50"), 100, 2) {
+		t.Error("a node that serves its history counted")
+	}
+}

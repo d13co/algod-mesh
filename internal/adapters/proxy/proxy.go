@@ -157,13 +157,7 @@ func peekMessage(resp *http.Response) string {
 		io.Reader
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(b), resp.Body), resp.Body}
-	var e struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(b, &e) != nil {
-		return ""
-	}
-	return e.Message
+	return messageOf(b, resp.Header.Get("Content-Encoding"))
 }
 
 // errorMessage reads the "message" of algod's JSON error body, "" when
