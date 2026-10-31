@@ -93,6 +93,9 @@ type RequestClass struct {
 	// Holders marks GET /v2/assets/{asset-id}/holders, an asset's holders
 	// at a round, which only a node with TimeTravelHoldersIndex answers.
 	Holders bool
+	// Boxes marks an app's box listing, /v2/applications/{id}/boxes, which
+	// stock algod answers at a round within its lookback.
+	Boxes bool
 }
 
 // Slot is a kind of request that can keep a node busy for long. A node
@@ -409,6 +412,9 @@ func (c RequestClass) String() string {
 	if c.Holders {
 		parts = append(parts, "holders")
 	}
+	if c.Boxes {
+		parts = append(parts, "boxes")
+	}
 	if c.Round != nil {
 		switch c.RoundWindow {
 		case WindowState:
@@ -584,6 +590,7 @@ func Classify(method, path, rawQuery string) RequestClass {
 		case seg(1) == "applications" && seg(3) == "boxes":
 			// Stock algod takes round on a box listing, within its
 			// account-state lookback; a time-travel node serves any round.
+			c.Boxes = len(segs) == 4
 			if ok {
 				c.Round = &r
 				c.RoundWindow = WindowState

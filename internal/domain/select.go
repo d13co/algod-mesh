@@ -89,7 +89,7 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 	// there, while history answers it exactly.
 	hasTT := false
 	for _, u := range elig {
-		if u.Caps.TimeTravel {
+		if u.ServesHistory() {
 			hasTT = true
 			break
 		}
@@ -152,7 +152,7 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 // round. It is a selection-only preference: eligible stays exact, and a fleet
 // with no time-travel node still routes such a round to this node.
 func stateWindowEdge(u Upstream, c RequestClass) bool {
-	if c.Round == nil || c.RoundWindow == WindowBlock || u.Caps.TimeTravel || u.Kind == KindLocal {
+	if c.Round == nil || c.RoundWindow == WindowBlock || u.ServesHistory() || u.Kind == KindLocal {
 		return false
 	}
 	if u.LastRound < u.Caps.MaxAcctLookback {
