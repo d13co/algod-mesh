@@ -26,7 +26,6 @@ type Versions struct {
 	Build     string
 }
 
-// AlgodClient talks to one algod REST endpoint.
 // NodeCapabilities is what a dtalgorand node reports at GET
 // /v2/capabilities.
 type NodeCapabilities struct {
@@ -37,6 +36,7 @@ type NodeCapabilities struct {
 	Limits domain.SimulateLimits
 }
 
+// AlgodClient talks to one algod REST endpoint.
 type AlgodClient interface {
 	Status(ctx context.Context) (Status, error)
 	// WaitForBlockAfter long-polls /v2/status/wait-for-block-after/{round}.

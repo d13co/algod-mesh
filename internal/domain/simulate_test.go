@@ -3,6 +3,7 @@ package domain
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 var dtLimits = SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 4}
@@ -161,9 +162,11 @@ func TestFleetCapabilities(t *testing.T) {
 	}
 	// dt allows more groups, small more rounds: the answer is dt's alone,
 	// not small's rounds with dt's groups, which no node runs together.
-	// The multiplier is the smallest, the stock node's.
-	got, ok := FleetCapabilities(us, 100, 2)
-	want := FleetCapabilitiesReply{TimeTravel: true,
+	// The multiplier is the smallest, the stock node's. The developer API is
+	// the down node's: it counts for the fleet's features, with what it
+	// last had, though not for the limits.
+	got, ok := FleetCapabilities(us, 100, 2, 0)
+	want := FleetCapabilitiesReply{TimeTravel: true, DeveloperAPI: true,
 		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1}}
 	if !ok || got != want {
 		t.Fatalf("fleet limits %+v %v, want %+v", got, ok, want)
@@ -171,7 +174,7 @@ func TestFleetCapabilities(t *testing.T) {
 	// A node at least as large everywhere wins whatever the order.
 	big := SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 8}
 	more := append([]Upstream{{ID: "big", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &big, TimeTravel: true, DeveloperAPI: true}}}, us[1:]...)
-	got, _ = FleetCapabilities(more, 100, 2)
+	got, _ = FleetCapabilities(more, 100, 2, 0)
 	want = FleetCapabilitiesReply{TimeTravel: true, DeveloperAPI: true,
 		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 4}}
 	if got != want {
@@ -184,7 +187,7 @@ func TestFleetCapabilities(t *testing.T) {
 		{ID: "history", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small, TimeTravel: true}},
 		{ID: "dev", Health: HealthSynced, LastRound: 100, Caps: Capabilities{DeveloperAPI: true}},
 	}
-	got, _ = FleetCapabilities(mixed, 100, 2)
+	got, _ = FleetCapabilities(mixed, 100, 2, 0)
 	if !got.TimeTravel || !got.DeveloperAPI || got.Simulate.MaxTxnGroups != big.MaxTxnGroups {
 		t.Fatalf("mixed fleet: %+v", got)
 	}
@@ -194,17 +197,61 @@ func TestFleetCapabilities(t *testing.T) {
 		l.TimeLimitSeconds = secs
 		return Upstream{ID: id, Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &l}}
 	}
-	if got, _ = FleetCapabilities([]Upstream{limited("a", 0), limited("b", 30), limited("c", 10)}, 100, 2); got.TimeLimitSeconds != 10 {
+	if got, _ = FleetCapabilities([]Upstream{limited("a", 0), limited("b", 30), limited("c", 10)}, 100, 2, 0); got.TimeLimitSeconds != 10 {
 		t.Fatalf("time limit %d, want 10", got.TimeLimitSeconds)
 	}
-	if got, _ = FleetCapabilities([]Upstream{limited("a", 0)}, 100, 2); got.TimeLimitSeconds != 0 {
+	if got, _ = FleetCapabilities([]Upstream{limited("a", 0)}, 100, 2, 0); got.TimeLimitSeconds != 0 {
 		t.Fatalf("no limit: %d", got.TimeLimitSeconds)
 	}
-	if _, ok := FleetCapabilities(us[:1], 100, 2); ok {
+	// The router gives up on a node at its upstream timeout, so the time
+	// limit is at most that, in whole seconds and at least 1.
+	for _, tc := range []struct {
+		secs    uint64
+		timeout time.Duration
+		want    uint64
+	}{{0, time.Minute, 60}, {30, 10 * time.Second, 10}, {30, time.Minute, 30}, {0, 1500 * time.Millisecond, 1}, {30, 500 * time.Millisecond, 1}} {
+		if got, _ = FleetCapabilities([]Upstream{limited("a", tc.secs)}, 100, 2, tc.timeout); got.TimeLimitSeconds != tc.want {
+			t.Fatalf("time limit %d with upstream timeout %s: %d, want %d", tc.secs, tc.timeout, got.TimeLimitSeconds, tc.want)
+		}
+	}
+	if _, ok := FleetCapabilities(us[:1], 100, 2, 0); ok {
 		t.Fatal("a fleet of stock nodes reported limits")
 	}
-	if _, ok := FleetCapabilities(us[3:], 100, 2); ok {
+	if _, ok := FleetCapabilities(us[3:], 100, 2, 0); ok {
 		t.Fatal("an unreachable node's limits counted")
+	}
+}
+
+// A time-travel node only out for now still makes the fleet's time-travel
+// true: clients keep the answer, and reads at a round still route to it once
+// it is back. One whose capabilities are unknown, or that is excluded, does
+// not count.
+func TestFleetCapabilitiesFeaturesOfNodesOut(t *testing.T) {
+	small := SimulateLimits{MaxTxnGroups: 4, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 8}
+	tt := Capabilities{Simulate: &small, TimeTravel: true, DeveloperAPI: true}
+	for _, tc := range []struct {
+		name string
+		out  func(*Upstream)
+		want bool
+	}{
+		{"lagging", func(u *Upstream) { u.LastRound = 50 }, true},
+		{"busy", func(u *Upstream) { u.Stats.BusySlots = Slots(0).With(SlotHeavy) }, true},
+		{"throttled", func(u *Upstream) { u.Stats.Throttled = true }, true},
+		{"breaker open", func(u *Upstream) { u.Stats.BreakerOpen = true }, true},
+		{"draining", func(u *Upstream) { u.Draining = true }, true},
+		{"down", func(u *Upstream) { u.Health, u.Caps, u.LastCaps = HealthOffline, Capabilities{}, &tt }, true},
+		{"unknown", func(u *Upstream) { u.Health, u.Caps, u.CapsUnknown = HealthOffline, Capabilities{}, true }, false},
+		{"excluded", func(u *Upstream) { u.Excluded = true }, false},
+	} {
+		us := []Upstream{
+			{ID: "dt", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &dtLimits}},
+			{ID: "history", Health: HealthSynced, LastRound: 100, Caps: tt},
+		}
+		tc.out(&us[1])
+		got, ok := FleetCapabilities(us, 100, 2, 0)
+		if !ok || got.TimeTravel != tc.want || got.DeveloperAPI != tc.want || got.Simulate.MaxTxnGroups != dtLimits.MaxTxnGroups {
+			t.Fatalf("%s: %+v %v, want time-travel and developer-api %v", tc.name, got, ok, tc.want)
+		}
 	}
 }
 

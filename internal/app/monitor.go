@@ -220,6 +220,10 @@ func (m *Monitor) configLoop(ctx context.Context) {
 				m.log.Info("node config changed, re-reading")
 				m.readConfig()
 				m.requestVerify()
+				// Compare the running node with the new file now, rather
+				// than at the next verify interval, so that an edit the
+				// node has not applied is warned about promptly.
+				m.refreshLimits(ctx)
 			}
 		}
 	}
@@ -467,7 +471,8 @@ func (b *backoff) next() time.Duration {
 func (b *backoff) reset() { b.cur = 0 }
 
 // refreshLimits reads the simulate limits again, for an algod restarted with
-// a new config without the agent seeing it go away.
+// a new config without the agent seeing it go away, and checks the running
+// config against config.json.
 func (m *Monitor) refreshLimits(ctx context.Context) {
 	if !m.State().Online {
 		return

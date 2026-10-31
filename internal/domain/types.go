@@ -457,8 +457,29 @@ type Upstream struct {
 	// (agent silent, node answered directly), check (external health check)
 	// or none.
 	Source string `json:"source,omitempty"`
+	// LastCaps is, for an upstream with no live facts (Caps zero, so that
+	// nothing is routed on them), the capabilities it was last known to
+	// have: its last heartbeat's, else its declared ones. nil when none.
+	LastCaps *Capabilities `json:"-"`
+	// CapsUnknown is set when nothing is known of the upstream's
+	// capabilities: a peer never heard from, with none declared.
+	CapsUnknown bool `json:"caps_unknown,omitempty"`
 	// Score is filled by the selector for status output only.
 	Score float64 `json:"score,omitempty"`
+}
+
+// KnownCaps returns what the upstream is known to have, whether or not it
+// can serve now: Caps, or LastCaps for one that is out. ok is false when
+// nothing is known of it. It is for answers about the fleet's features,
+// never for routing.
+func (u Upstream) KnownCaps() (c Capabilities, ok bool) {
+	switch {
+	case u.CapsUnknown:
+		return Capabilities{}, false
+	case u.LastCaps != nil:
+		return *u.LastCaps, true
+	}
+	return u.Caps, true
 }
 
 // Mode selects the routing policy.

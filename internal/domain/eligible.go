@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // Eligible reports whether an upstream may serve a request of class c given
 // the best round known across the fleet and the sync tolerance.
 //
@@ -214,21 +216,27 @@ type FleetQueryLimits struct {
 // of them, and that is what it is sure to get. ok is false when no
 // eligible upstream reports limits, a fleet of stock algods.
 //
-// Time travel and the developer API are the fleet's: true when any eligible
-// node has them, since the router sends the requests that need them to such
-// a node. A client (go-dtalgorand-sdk) reads time-travel to choose between
-// reads at a round and the latest state, and would wrongly fall back if it
-// were only the simulate node's. A simulation at an old round still needs a
-// time-travel node within the simulate limits, which this does not promise.
+// Time travel and the developer API are the fleet's: true when any node not
+// excluded has them, since the router sends the requests that need them to
+// such a node. A client (go-dtalgorand-sdk) reads time-travel to choose
+// between reads at a round and the latest state, keeps the answer, and
+// would wrongly fall back if it were only the simulate node's. A node that
+// is only out for now (lagging, busy, down) counts, with what it last had:
+// a read at a round still routes to it once it is back, and until then gets
+// a 503 to retry. So the features can come from a different node than the
+// simulate limits: a simulation at an old round, or with an execution
+// trace, may fit no node though it is within them.
+//
 // The time limit is the smallest any eligible dtalgorand node reports (0,
 // no limit, counts as none), since deltas and versions pages may go to any
-// of them.
+// of them, and at most upstreamTimeout in whole seconds (at least 1), after
+// which the router gives up on a node with its own 504.
 //
 // The query object is that of the eligible node with the largest query
 // limits, compared in order: calls, rounds, call budget, time travel, then
 // its id. It is picked apart from the simulate limits, as a query is routed
 // apart from a simulation.
-func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabilitiesReply, bool) {
+func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeout time.Duration) (FleetCapabilitiesReply, bool) {
 	var best, bestQuery *Upstream
 	var multiplier, timeLimit uint64
 	var timeTravel, developerAPI bool
@@ -236,6 +244,10 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabil
 	query := RequestClass{Query: true, Idempotent: true}
 	for i := range us {
 		u := &us[i]
+		if c, ok := u.KnownCaps(); ok && !u.Excluded {
+			timeTravel = timeTravel || c.TimeTravel
+			developerAPI = developerAPI || c.DeveloperAPI
+		}
 		if Eligible(*u, query, bestRound, tolerance) && (bestQuery == nil || queryLimitsAbove(*u, *bestQuery)) {
 			bestQuery = u
 		}
@@ -245,8 +257,6 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabil
 		if m := u.Caps.SimulateLimits().ResourceLimitMultiplier; multiplier == 0 || m < multiplier {
 			multiplier = m
 		}
-		timeTravel = timeTravel || u.Caps.TimeTravel
-		developerAPI = developerAPI || u.Caps.DeveloperAPI
 		if u.Caps.Simulate == nil {
 			continue
 		}
@@ -259,6 +269,12 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabil
 	}
 	if best == nil {
 		return FleetCapabilitiesReply{}, false
+	}
+	if upstreamTimeout > 0 {
+		cut := max(uint64(upstreamTimeout/time.Second), 1)
+		if timeLimit == 0 || timeLimit > cut {
+			timeLimit = cut
+		}
 	}
 	l := best.Caps.SimulateLimits()
 	reply := FleetCapabilitiesReply{TimeTravel: timeTravel, DeveloperAPI: developerAPI, TimeLimitSeconds: timeLimit,
