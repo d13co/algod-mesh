@@ -152,7 +152,28 @@ func TestRoundUnhonoredEverywhere(t *testing.T) {
 			t.Fatalf("attempt %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}
-	if f.b.Hits(pastAccount) != 1 || f.c.Hits(pastAccount) != 1 {
-		t.Fatalf("each node asked once: b %d c %d", f.b.Hits(pastAccount), f.c.Hits(pastAccount))
+	// No node honoured it, so none is passed over: the request is as
+	// likely to blame, and one client mustn't take the history out of use.
+	if f.b.Hits(pastAccount) != 2 || f.c.Hits(pastAccount) != 2 {
+		t.Fatalf("each node asked on each request: b %d c %d", f.b.Hits(pastAccount), f.c.Hits(pastAccount))
+	}
+	if f.stats("b").RoundUnhonored || f.stats("c").RoundUnhonored {
+		t.Fatal("a node was passed over though none honoured the round")
+	}
+}
+
+// A path that takes no round, such as pending transactions by address, is
+// answered without the mark and is not checked: no node is passed over.
+func TestRoundCheckSkipsUnmarkedRoutes(t *testing.T) {
+	f := ttHeaderFleet(t)
+	path := pastAccount + "/transactions/pending"
+	f.b.SetOmitTTRound(true)
+	f.c.SetOmitTTRound(true)
+	rec := f.do(http.MethodGet, path+"?round=50", nil)
+	if rec.Code != 200 || f.stats("b").RoundUnhonored || f.stats("c").RoundUnhonored {
+		t.Fatalf("pending by address: %d %s", rec.Code, rec.Body.String())
+	}
+	if f.b.Hits(path)+f.c.Hits(path) != 1 {
+		t.Fatalf("retried: b %d c %d", f.b.Hits(path), f.c.Hits(path))
 	}
 }

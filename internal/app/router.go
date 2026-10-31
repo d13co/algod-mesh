@@ -465,7 +465,7 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		target.Check = func(status int, _ http.Header, msg string) bool {
 			return !boxesRoundGone(class, ports.Outcome{Status: status, Message: msg})
 		}
-	case class.TimeTravel && class.Round != nil && u.Caps.TTRoundHeader:
+	case class.RoundMarked && class.TimeTravel && u.Caps.TTRoundHeader:
 		// The node marks what it answers at a round; an answer without the
 		// mark ignored the round, and goes to no client that asked for one.
 		want := strconv.FormatUint(*class.Round, 10)
@@ -487,11 +487,15 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		r.metric.Inc("mesh_upstream_history_untrusted", "upstream", u.ID)
 		r.log.Warn("upstream does not serve its time travel history", "upstream", u.ID, "reason", out.Message)
 	case roundUnhonored(class, out):
-		// The node answered as of another round, likely its latest: it gets
-		// no request at a round for a while, and the rest as before.
-		r.stats.RoundUnhonored(u.ID, roundUnhonoredFor)
-		r.metric.Inc("mesh_upstream_round_unhonored", "upstream", u.ID)
-		r.log.Warn("upstream ignored the round of a request: its answer lacks "+domain.TTRoundHeader+" with that round",
+		// The node answered as of another round, likely its latest. It is
+		// passed over only once another node honours the same request (see
+		// roundRefusals): when every node refuses it, the request is the
+		// likelier cause, and one client must not take the fleet's history
+		// out of service.
+		if rr, ok := ctx.Value(roundRefusalsKey{}).(*roundRefusals); ok {
+			rr.ids = append(rr.ids, u.ID)
+		}
+		r.log.Debug("upstream answer lacks "+domain.TTRoundHeader+" with the request's round",
 			"upstream", u.ID, "round", *class.Round, "status", out.Status)
 	case boxIndexMissing(class, out):
 		// The node's box index does not reach back to the page's range. A
@@ -511,6 +515,17 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		r.metric.Inc("mesh_upstream_busy", "upstream", u.ID, "class", class.StatKey())
 	default:
 		r.stats.Record(u.ID, class.StatKey(), out)
+	}
+	if rr, ok := ctx.Value(roundRefusalsKey{}).(*roundRefusals); ok && target.Check != nil && !out.Failed() && len(rr.ids) > 0 {
+		// This node honoured the round, so those that refused this request
+		// ignore it: they get no request at a round for a while.
+		for _, id := range rr.ids {
+			r.stats.RoundUnhonored(id, roundUnhonoredFor)
+			r.metric.Inc("mesh_upstream_round_unhonored", "upstream", id)
+			r.log.Warn("upstream ignored the round of a request that another honoured: its answer lacked "+domain.TTRoundHeader+" with that round",
+				"upstream", id, "round", *class.Round, "honoured_by", u.ID)
+		}
+		rr.ids = nil
 	}
 	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
 	r.metric.Observe("mesh_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
@@ -618,6 +633,12 @@ func honorsRound(status int, h http.Header, msg, want string) bool {
 func roundUnhonored(class domain.RequestClass, out ports.Outcome) bool {
 	return out.Refused && class.TimeTravel && class.Round != nil
 }
+
+// roundRefusals collects, for one request, the nodes whose answer lacked
+// its round, until another node honours it.
+type roundRefusals struct{ ids []string }
+
+type roundRefusalsKey struct{}
 
 // roundUnhonoredFor is how long a node that ignored a request's round is
 // held to a stock node's windows. It is not failing, and its other answers
@@ -904,6 +925,9 @@ func timeLeft(ctx context.Context) bool {
 // requestCtx), each by UpstreamTimeout within it, so nodes that accept and
 // hang cost the client one request's worth of time, not one per node.
 func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, sel domain.Selection) {
+	if class.RoundMarked {
+		ctx = context.WithValue(ctx, roundRefusalsKey{}, &roundRefusals{})
+	}
 	tries := append([]domain.Upstream{sel.Chosen}, sel.Alternates...)
 	if b := r.opts.RetryBudget; b >= 0 && len(tries) > 1+b {
 		tries = tries[:1+b]
