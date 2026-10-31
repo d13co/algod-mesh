@@ -7,11 +7,12 @@ package domain
 // breaker closed; not throttled, nor busy for the request's slot; time-travel
 // history when the request needs it, and the asset holders index, not known
 // to be missing; synced (within tolerance of best) unless the class is
-// local-only or the request is for a specific round the node holds; the
-// round is in the window the class needs (block or account state), and
-// every round a simulation lists has been reached; developer API
-// when needed; the simulate or query limits and options the request needs;
-// no broadcast to followers.
+// local-only, the request is for a specific round the node holds, or a
+// versions page ends at a round it has reached; the round is in the window
+// the class needs (block or account state), and every round a simulation,
+// query or versions page names has been reached; developer API when needed;
+// the simulate or query limits and options the request needs; no broadcast
+// to followers.
 func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if u.Excluded || !u.Health.Reachable() || u.Draining {
 		return false
@@ -28,9 +29,12 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if c.Holders && (!u.Caps.HoldersIndex || u.Stats.HoldersMissing) {
 		return false
 	}
+	if c.RoundHigh > u.LastRound {
+		return false
+	}
 	if c.Round != nil {
 		r := *c.Round
-		if r > u.LastRound || c.RoundHigh > u.LastRound {
+		if r > u.LastRound {
 			return false
 		}
 		switch {
@@ -56,7 +60,9 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 		if c.needsLatest() && !inSync(u, bestRound, tolerance) {
 			return false
 		}
-	} else if !c.LocalOnly && !inSync(u, bestRound, tolerance) {
+	} else if !c.LocalOnly && c.RoundHigh == 0 && !inSync(u, bestRound, tolerance) {
+		// Unless a versions page ends at a round the node has reached: the
+		// page is the same on every node that has, lagging or not.
 		return false
 	}
 	if c.WaitAfter != nil && *c.WaitAfter > u.LastRound+1 {

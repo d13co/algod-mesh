@@ -15,6 +15,7 @@ func u64(v uint64) *uint64 { return &v }
 func TestClassify(t *testing.T) {
 	notFound := Reply{404, "failed to retrieve information from the ledger"}
 	tooHigh := Reply{500, "given round is greater than the latest round"}
+	versionsAhead := Reply{400, "given round is greater than the latest round"}
 	cases := []struct {
 		method, path, query string
 		want                RequestClass
@@ -65,6 +66,36 @@ func TestClassify(t *testing.T) {
 		{method: "GET", path: "/v2/assets/42/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 		{method: "GET", path: "/v2/applications/42/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 		{method: "GET", path: "/v2/applications/42/box/versions", query: "name=str:k", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		// A page up to max-round, or the last of rounds, needs a node that
+		// has reached it; past every node, algod's own 400.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
+		{method: "GET", path: "/v2/assets/42/versions", query: "min-round=10&max-round=500&limit=5", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
+		{method: "GET", path: "/v2/applications/42/versions", query: "rounds=30,500,7", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30%2C500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
+		// min-round alone ends at the node's latest; round 0 every node has.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "min-round=500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=0", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		// Every node rejects rounds with min-round or max-round, and a
+		// malformed or repeated value: the node answers it.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30,500&max-round=600", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30,500&min-round=10", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=abc", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=-5", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=5&max-round=6", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30,x", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30,", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30&rounds=500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		// Only GET has the route: every node answers another method 405.
+		{method: "POST", path: "/v2/accounts/ADDR/versions", query: "max-round=500", want: RequestClass{TimeTravel: true, Versions: true}},
+		// A malformed pair must not hide a well-formed max-round.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=500&x=%zz", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
 		// dtalgorand's holders index: the latest round, or any of the history.
 		{method: "GET", path: "/v2/assets/42/holders", want: RequestClass{TimeTravel: true, Holders: true, Idempotent: true}},
 		{method: "GET", path: "/v2/assets/42/holders", query: "round=100&limit=5", want: RequestClass{Round: u64(100), RoundWindow: WindowState,
@@ -144,6 +175,8 @@ func stateUp(id string, h Health, round, oldest, maxAcct uint64) Upstream {
 
 func TestEligible(t *testing.T) {
 	local := up("local", KindLocal, 1, HealthSynced, 1000)
+	laggingTT := ttUp(5000, 4000)
+	laggingTT.Health = HealthLagging
 	tests := []struct {
 		name string
 		u    Upstream
@@ -205,6 +238,12 @@ func TestEligible(t *testing.T) {
 			RequestClass{Round: u64(4997), RoundWindow: WindowDelta}, 5000, true},
 		{"versions on plain node", up("p", KindPeer, 1, HealthSynced, 5000), RequestClass{TimeTravel: true}, 5000, false},
 		{"versions on tt node", ttUp(5000, 4000), RequestClass{TimeTravel: true}, 5000, true},
+		// A versions page up to a round needs a node that has reached it,
+		// and is served by one even while it lags.
+		{"versions past the node's round", ttUp(5000, 4000), RequestClass{TimeTravel: true, Versions: true, RoundHigh: 5001}, 5000, false},
+		{"versions at the node's round", ttUp(5000, 4000), RequestClass{TimeTravel: true, Versions: true, RoundHigh: 5000}, 5000, true},
+		{"versions on a lagging node that reached the round", laggingTT, RequestClass{TimeTravel: true, Versions: true, RoundHigh: 4990}, 6000, true},
+		{"versions to the latest on a lagging node", laggingTT, RequestClass{TimeTravel: true, Versions: true}, 6000, false},
 		// Asset holders need the index as well as the history.
 		{"holders on tt node without the index", ttUp(5000, 4000), RequestClass{TimeTravel: true, Holders: true}, 5000, false},
 		{"holders on a holders node", holdersUp(), RequestClass{TimeTravel: true, Holders: true}, 5000, true},
