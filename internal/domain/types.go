@@ -446,6 +446,11 @@ type Stats struct {
 	// dtalgorand's 503 for a history that differs from the chain: as
 	// Capabilities.HistoryUntrusted, learned from the answer, for a while.
 	HistoryUntrusted bool `json:"history_untrusted,omitempty"`
+	// RoundUnhonored is a node that marks its answers at a round with
+	// X-Algod-TT-Round and gave one without it, or with another round: it
+	// answered the latest state, or something else, instead of the round.
+	// It is held to a stock node's windows for a while.
+	RoundUnhonored bool `json:"round_unhonored,omitempty"`
 }
 
 // Upstream is one candidate the router chooses between. It is a value
@@ -474,10 +479,11 @@ type Upstream struct {
 }
 
 // ServesHistory reports whether u answers from its time-travel history right
-// now: a time-travel node whose history is not known to be untrusted. One
+// now: a time-travel node whose history is not known to be untrusted, and
+// that has not lately answered a request at a round without the round. One
 // that is answers as a stock node does.
 func (u Upstream) ServesHistory() bool {
-	return u.Caps.TimeTravel && !u.Caps.HistoryUntrusted && !u.Stats.HistoryUntrusted
+	return u.Caps.TimeTravel && !u.Caps.HistoryUntrusted && !u.Stats.HistoryUntrusted && !u.Stats.RoundUnhonored
 }
 
 // Mode selects the routing policy.

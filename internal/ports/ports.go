@@ -137,11 +137,12 @@ type Target struct {
 	// otherwise withheld: dtalgorand's 504 for a simulation that ran out of
 	// time, which would run as long on the next node.
 	PassStatus map[int]bool
-	// OnResponse, when set, sees each upstream answer's status and headers
-	// before anything is decided or copied to the client, and may change
-	// the headers: the rate limiter reads and strips a node's effort.
+	// OnResponse, when set, sees each upstream answer that Check let through,
+	// with its status and headers, before anything is copied to the client,
+	// and may change the headers: the rate limiter reads and strips a node's
+	// effort.
 	OnResponse func(status int, h http.Header)
-	// Check, when set, sees each upstream answer after OnResponse, with the
+	// Check, when set, sees each upstream answer first, with the
 	// message of a small error answer ("" for any other), before anything
 	// is copied to the client. False withholds the answer, as a failure the
 	// router may try another upstream for: an answer that only looks like
@@ -161,6 +162,8 @@ type Outcome struct {
 	// sends it, or of an answer Target.Check withheld; "" when there is
 	// none, or it is not short with a declared length.
 	Message string
+	// Refused is true when Target.Check withheld the answer.
+	Refused bool
 }
 
 // Failed is true when the outcome should count against the upstream.

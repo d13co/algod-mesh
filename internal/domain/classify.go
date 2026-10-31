@@ -96,6 +96,10 @@ type RequestClass struct {
 	// Boxes marks an app's box listing, /v2/applications/{id}/boxes, which
 	// stock algod answers at a round within its lookback.
 	Boxes bool
+	// RoundMarked is a GET at a round whose dtalgorand answer carries
+	// TTRoundHeader with that round when the node honoured it: the reads
+	// that look the round up in the history (roundMarkedRoute).
+	RoundMarked bool
 }
 
 // Slot is a kind of request that can keep a node busy for long. A node
@@ -480,6 +484,26 @@ func (c RequestClass) StatKey() string {
 	return "default"
 }
 
+// roundMarkedRoute reports a path whose dtalgorand handler marks every
+// answer at a round with TTRoundHeader: the reads that look the round up in
+// the history. Other paths under these groups take no round (pending
+// transactions by address, say) or are box listings, which stock algod
+// answers at recent rounds without the mark.
+func roundMarkedRoute(segs []string) bool {
+	n := len(segs)
+	switch segs[1] {
+	case "accounts":
+		return n == 3 || (n == 4 || n == 5) && (segs[3] == "assets" || segs[3] == "applications")
+	case "assets":
+		return n == 3 || n == 4 && segs[3] == "holders"
+	case "applications":
+		return n == 3 || n == 4 && segs[3] == "box"
+	case "ledger":
+		return n == 3 && segs[2] == "supply"
+	}
+	return false
+}
+
 // Classify derives the RequestClass from method, path and raw query. It is a
 // pure function of its inputs and is the only place route knowledge lives.
 func Classify(method, path, rawQuery string) RequestClass {
@@ -609,6 +633,7 @@ func Classify(method, path, rawQuery string) RequestClass {
 			// Supply at the latest round is still the local node's to answer.
 			c.LocalOnly = true
 		}
+		c.RoundMarked = ok && method == "GET" && roundMarkedRoute(segs)
 	case "status":
 		if seg(2) == "wait-for-block-after" {
 			if r, ok := parseRound(seg(3)); ok {
