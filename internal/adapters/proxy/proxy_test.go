@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,7 +91,7 @@ func TestForwardWithheldMessage(t *testing.T) {
 	if out.Status != 503 || out.Message != "timetravel: the asset holders index is not complete" || rec.Body.Len() != 0 {
 		t.Fatalf("outcome %+v, client saw %q", out, rec.Body.String())
 	}
-	if m := errorMessage(strings.NewReader("down")); m != "" {
+	if m := errorMessage(strings.NewReader("down"), ""); m != "" {
 		t.Fatalf("message of a body that is not JSON: %q", m)
 	}
 	// A chunked body, or another status's, is closed unread.
@@ -153,5 +155,75 @@ func TestForwardCheck(t *testing.T) {
 	out = f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, Check: check(true)})
 	if out.Failed() || !out.HeadersSent || rec.Code != 400 || rec.Body.String() != body || seen != "given round is no longer available" {
 		t.Fatalf("accepted: %+v %d %q seen %q", out, rec.Code, rec.Body.String(), seen)
+	}
+}
+
+// algod gzips its answers, errors included, to a client that accepts gzip
+// (echo's Gzip middleware). The message is read through the compression,
+// and the transport doesn't ask for gzip on a client's behalf: a client that
+// doesn't accept it gets the plain answer, with its length.
+func TestForwardWithheldMessageGzip(t *testing.T) {
+	const msg = "the time travel history is not served: it differs from the chain"
+	var asked []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.Header.Get("Accept-Encoding"))
+		body := []byte(`{"message":"` + msg + `"}`)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			var z bytes.Buffer
+			zw := gzip.NewWriter(&z)
+			zw.Write(body)
+			zw.Close()
+			body = z.Bytes()
+			w.Header().Set("Content-Encoding", "gzip")
+		}
+		w.WriteHeader(503)
+		w.Write(body)
+	}))
+	defer up.Close()
+	for _, accept := range []string{"gzip", ""} {
+		req := httptest.NewRequest("GET", "/v2/accounts/A?round=5", nil)
+		if accept != "" {
+			req.Header.Set("Accept-Encoding", accept)
+		}
+		out := New(nil).Forward(httptest.NewRecorder(), req, ports.Target{BaseURL: up.URL})
+		if out.Status != 503 || out.Message != msg {
+			t.Fatalf("accept %q: outcome %+v", accept, out)
+		}
+	}
+	if asked[1] != "" {
+		t.Fatalf("the transport asked for %q on a client's behalf", asked[1])
+	}
+	if m := messageOf([]byte("not gzip"), "gzip"); m != "" {
+		t.Fatalf("message of a broken gzip body: %q", m)
+	}
+	if m := messageOf([]byte(`{"message":"x"}`), "br"); m != "" {
+		t.Fatalf("message of an unknown encoding: %q", m)
+	}
+}
+
+// Check reads a gzip answer's message through the compression, and an
+// accepted one reaches the client still compressed, byte for byte.
+func TestForwardCheckGzip(t *testing.T) {
+	const msg = "given round is no longer available"
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	zw.Write([]byte(`{"message":"` + msg + `"}`))
+	zw.Close()
+	body := z.Bytes()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(400)
+		w.Write(body)
+	}))
+	defer up.Close()
+	var seen string
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	out := New(nil).Forward(rec, req, ports.Target{BaseURL: up.URL,
+		Check: func(_ int, _ http.Header, m string) bool { seen = m; return true }})
+	if out.Failed() || seen != msg || rec.Code != 400 || !bytes.Equal(rec.Body.Bytes(), body) || rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("outcome %+v seen %q, client got %d %q", out, seen, rec.Code, rec.Body.Bytes())
 	}
 }

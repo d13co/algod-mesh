@@ -646,8 +646,9 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	r.metric.Inc("mesh_requests_unroutable", "class", class.StatKey())
 	summary := make([]string, 0, len(cands))
 	for _, u := range cands {
-		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v tt=%v holders=%v breaker=%v draining=%v)", u.ID, u.Health,
-			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Caps.TimeTravel, u.Caps.HoldersIndex, u.Stats.BreakerOpen, u.Draining))
+		summary = append(summary, fmt.Sprintf("%s(%s r=%d oldest=%d dev=%v follow=%v tt=%v untrusted=%v holders=%v breaker=%v draining=%v)", u.ID, u.Health,
+			u.LastRound, u.Caps.OldestRound, u.Caps.DeveloperAPI, u.Caps.FollowMode, u.Caps.TimeTravel,
+			u.Caps.TimeTravel && !u.ServesHistory(), u.Caps.HoldersIndex, u.Stats.BreakerOpen, u.Draining))
 	}
 	r.log.Warn("no eligible upstream", "class", class.String(), "best", best, "candidates", strings.Join(summary, " "))
 	if class.LocalOnly && r.opts.Balancer {
@@ -658,7 +659,8 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 		writeMessage(w, 503, "algod-mesh: this request needs a time-travel node and the fleet has none")
 		return
 	}
-	if (class.TimeTravel || class.Boxes && class.Round != nil) && allHistoryUntrusted(cands) {
+	if (class.TimeTravel || class.Boxes && class.Round != nil) && allHistoryUntrusted(cands) &&
+		untrustedWouldServe(cands, class, best, r.opts.SyncTolerance) {
 		writeMessage(w, 503, historyUntrustedMessage)
 		return
 	}
@@ -774,6 +776,23 @@ func noneServesHistory(us []domain.Upstream) bool {
 		n++
 	}
 	return n > 0
+}
+
+// untrustedWouldServe reports whether a node held to a stock node's windows
+// for its untrusted history would serve the request if it served its
+// history: only then is the history why no node does. A box listing the
+// stock nodes would serve but can't now (down, lagging) must not blame it.
+func untrustedWouldServe(us []domain.Upstream, class domain.RequestClass, best, tolerance uint64) bool {
+	for _, u := range us {
+		if !u.Caps.TimeTravel || u.Excluded || u.ServesHistory() {
+			continue
+		}
+		u.Caps.HistoryUntrusted, u.Stats.HistoryUntrusted = false, false
+		if domain.Eligible(u, class, best, tolerance) {
+			return true
+		}
+	}
+	return false
 }
 
 // historyUntrustedMessage answers a request at a past round when every

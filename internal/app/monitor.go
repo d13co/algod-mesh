@@ -22,8 +22,14 @@ type MonitorOptions struct {
 	StatusTimeout  time.Duration
 	MaxBackoff     time.Duration
 	VerifyInterval time.Duration // empirical re-check of oldest round
-	ConfigRecheck  time.Duration // how often config.json's mtime is polled
-	Overrides      *domain.CapabilityOverrides
+	// HistoryProbeInterval is how often a time-travel node is asked whether
+	// it serves its history (probeHistory). The node can stop or start
+	// serving it without a restart (a replay that finds a problem, a reload
+	// after a catchup), and until a peer knows, its requests fail with the
+	// node's usual errors rather than the 503 the router learns from.
+	HistoryProbeInterval time.Duration
+	ConfigRecheck        time.Duration // how often config.json's mtime is polled
+	Overrides            *domain.CapabilityOverrides
 	// Absent means there is no co-located node (a balancer): the monitor
 	// only reports Network as the genesis id and never goes online.
 	Absent  bool
@@ -51,6 +57,9 @@ func (o *MonitorOptions) defaults() {
 	}
 	if o.ConfigRecheck == 0 {
 		o.ConfigRecheck = time.Minute
+	}
+	if o.HistoryProbeInterval == 0 {
+		o.HistoryProbeInterval = time.Minute
 	}
 }
 
@@ -332,6 +341,8 @@ func (m *Monitor) requestVerify() {
 func (m *Monitor) verifyLoop(ctx context.Context) {
 	tick, stop := m.clock.Tick(m.opts.VerifyInterval)
 	defer stop()
+	probe, stopProbe := m.clock.Tick(m.opts.HistoryProbeInterval)
+	defer stopProbe()
 	for {
 		select {
 		case <-ctx.Done():
@@ -342,6 +353,7 @@ func (m *Monitor) verifyLoop(ctx context.Context) {
 		case <-tick:
 			m.verifyOldest(ctx, false)
 			m.refreshLimits(ctx)
+		case <-probe:
 			m.probeHistory(ctx)
 		}
 	}
