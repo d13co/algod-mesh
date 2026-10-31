@@ -551,15 +551,24 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 		writeMessage(w, 503, "algod-mesh: this agent is a balancer with no local node, and this request is only answered by one")
 		return
 	}
+	// A fleet without the feature answers as one dtalgorand node without it
+	// does, so that clients (go-dtalgorand-sdk) see the fleet doesn't
+	// support the request rather than a 503 to retry.
+	if class.Holders && !anyCaps(cands, func(c domain.Capabilities) bool { return c.HoldersIndex }) {
+		writeMessage(w, 400, noHoldersIndexMessage)
+		return
+	}
 	if class.TimeTravel && !anyTimeTravel(cands) {
-		writeMessage(w, 503, "algod-mesh: this request needs a time-travel node and the fleet has none")
+		if class.Versions {
+			// The node registers the versions routes only with time travel.
+			writeMessage(w, 404, noVersionsMessage)
+		} else {
+			writeMessage(w, 400, noTimeTravelMessage)
+		}
 		return
 	}
 	if class.Holders {
 		switch {
-		case !anyCaps(cands, func(c domain.Capabilities) bool { return c.HoldersIndex }):
-			writeMessage(w, 503, "algod-mesh: this request needs a node with TimeTravelHoldersIndex and the fleet has none")
-			return
 		case allHoldersMissing(cands):
 			writeMessage(w, 503, holdersMissingMessage)
 			return
@@ -631,8 +640,22 @@ func allHoldersMissing(us []domain.Upstream) bool {
 }
 
 // holdersMissingMessage answers a holders page when every node with the
-// option has said its index is missing or stale.
-const holdersMissingMessage = "algod-mesh: the asset holders index is missing or stale on every node that enables it: stop the node and build it with ttimport -holders-index"
+// option has said its index is missing or stale. It keeps the node's own
+// words ("the asset holders index is not complete"), which clients match.
+const holdersMissingMessage = "algod-mesh: the asset holders index is not complete on any node that enables it: stop the node and build it with ttimport -holders-index"
+
+// holdersMissingTriedMessage is holdersMissingMessage when some nodes with
+// the option were not tried.
+const holdersMissingTriedMessage = "algod-mesh: the asset holders index is not complete on the nodes tried"
+
+// The answers of a fleet without a feature, worded as dtalgorand words its
+// own refusal ("requires EnableTimeTravel", "asset holders require ..."),
+// which clients match.
+const (
+	noTimeTravelMessage   = "algod-mesh: looking up past rounds requires EnableTimeTravel, and no node in the fleet has it"
+	noVersionsMessage     = "algod-mesh: the versions endpoints require EnableTimeTravel, and no node in the fleet has it"
+	noHoldersIndexMessage = "algod-mesh: asset holders require EnableTimeTravel and TimeTravelHoldersIndex, and no node in the fleet has them"
+)
 
 func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
 	sel, cands, best, ok := r.pick(ctx, class, cands, best)
@@ -849,7 +872,7 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 		if cands, _ := r.dir.Snapshot(); allHoldersMissing(cands) {
 			writeMessage(w, 503, holdersMissingMessage)
 		} else {
-			writeMessage(w, 503, "algod-mesh: the asset holders index is missing or stale on the nodes tried")
+			writeMessage(w, 503, holdersMissingTriedMessage)
 		}
 	case out.Status >= 500 || out.Status == 429:
 		writeMessage(w, 502, fmt.Sprintf("algod-mesh: upstream answered %d", out.Status))

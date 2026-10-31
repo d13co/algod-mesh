@@ -136,7 +136,7 @@ func (c *Client) Versions(ctx context.Context) (ports.Versions, error) {
 
 // Capabilities implements ports.AlgodClient. A 404 is a node without the
 // endpoint: stock algod, or a dtalgorand from before it.
-func (c *Client) Capabilities(ctx context.Context) (*domain.SimulateLimits, error) {
+func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, error) {
 	const path = "/v2/capabilities"
 	code, body, err := c.get(ctx, path)
 	if err != nil {
@@ -148,8 +148,9 @@ func (c *Client) Capabilities(ctx context.Context) (*domain.SimulateLimits, erro
 	if code != 200 {
 		return nil, fmt.Errorf("%s: status %d: %s", path, code, truncate(body))
 	}
-	// time-travel and developer-api are read from the node's config instead.
 	var raw struct {
+		TimeTravel       bool   `json:"time-travel"`
+		DeveloperAPI     bool   `json:"developer-api"`
 		TimeLimitSeconds uint64 `json:"time-limit-seconds"`
 		Simulate         *struct {
 			MaxTxnGroups            uint64 `json:"max-txn-groups"`
@@ -173,14 +174,14 @@ func (c *Client) Capabilities(ctx context.Context) (*domain.SimulateLimits, erro
 		return nil, fmt.Errorf("%s: no simulate object: %s", path, truncate(body))
 	}
 	s := raw.Simulate
-	lim := &domain.SimulateLimits{MaxTxnGroups: s.MaxTxnGroups, MaxRounds: s.MaxRounds,
+	lim := domain.SimulateLimits{MaxTxnGroups: s.MaxTxnGroups, MaxRounds: s.MaxRounds,
 		MaxExtraOpcodeBudget: s.MaxExtraOpcodeBudget, ResourceLimitMultiplier: s.ResourceLimitMultiplier,
 		TimeLimitSeconds: raw.TimeLimitSeconds}
 	if q := raw.Query; q != nil {
 		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
 			MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
 	}
-	return lim, nil
+	return &ports.NodeCapabilities{TimeTravel: raw.TimeTravel, DeveloperAPI: raw.DeveloperAPI, Limits: lim}, nil
 }
 
 // BoxNames implements ports.AlgodClient.

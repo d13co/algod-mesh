@@ -211,9 +211,18 @@ type FleetQueryLimits struct {
 // limits are all at least another's always wins. The resource limit
 // multiplier is the smallest of every eligible node instead, stock ones
 // included: no request asks for it, so the router may send a request to any
-// of them, and that is what it is sure to get. The time travel, developer
-// API and time limit reported are that node's too. ok is false when no
+// of them, and that is what it is sure to get. ok is false when no
 // eligible upstream reports limits, a fleet of stock algods.
+//
+// Time travel and the developer API are the fleet's: true when any eligible
+// node has them, since the router sends the requests that need them to such
+// a node. A client (go-dtalgorand-sdk) reads time-travel to choose between
+// reads at a round and the latest state, and would wrongly fall back if it
+// were only the simulate node's. A simulation at an old round still needs a
+// time-travel node within the simulate limits, which this does not promise.
+// The time limit is the smallest any eligible dtalgorand node reports (0,
+// no limit, counts as none), since deltas and versions pages may go to any
+// of them.
 //
 // The query object is that of the eligible node with the largest query
 // limits, compared in order: calls, rounds, call budget, time travel, then
@@ -221,7 +230,8 @@ type FleetQueryLimits struct {
 // apart from a simulation.
 func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabilitiesReply, bool) {
 	var best, bestQuery *Upstream
-	var multiplier uint64
+	var multiplier, timeLimit uint64
+	var timeTravel, developerAPI bool
 	plain := RequestClass{Simulate: true, Idempotent: true}
 	query := RequestClass{Query: true, Idempotent: true}
 	for i := range us {
@@ -235,7 +245,15 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabil
 		if m := u.Caps.SimulateLimits().ResourceLimitMultiplier; multiplier == 0 || m < multiplier {
 			multiplier = m
 		}
-		if u.Caps.Simulate != nil && (best == nil || simulateLimitsAbove(*u, *best)) {
+		timeTravel = timeTravel || u.Caps.TimeTravel
+		developerAPI = developerAPI || u.Caps.DeveloperAPI
+		if u.Caps.Simulate == nil {
+			continue
+		}
+		if t := u.Caps.Simulate.TimeLimitSeconds; t > 0 && (timeLimit == 0 || t < timeLimit) {
+			timeLimit = t
+		}
+		if best == nil || simulateLimitsAbove(*u, *best) {
 			best = u
 		}
 	}
@@ -243,8 +261,7 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64) (FleetCapabil
 		return FleetCapabilitiesReply{}, false
 	}
 	l := best.Caps.SimulateLimits()
-	reply := FleetCapabilitiesReply{TimeTravel: best.Caps.TimeTravel, DeveloperAPI: best.Caps.DeveloperAPI,
-		TimeLimitSeconds: l.TimeLimitSeconds,
+	reply := FleetCapabilitiesReply{TimeTravel: timeTravel, DeveloperAPI: developerAPI, TimeLimitSeconds: timeLimit,
 		Simulate: FleetSimulateLimits{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds,
 			MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget, ResourceLimitMultiplier: multiplier}}
 	if bestQuery != nil {

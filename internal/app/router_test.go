@@ -717,7 +717,8 @@ func TestTimeTravelRoutesToHistoryNode(t *testing.T) {
 }
 
 // Without a time-travel node in the fleet, a historical request is refused
-// rather than answered with the latest state by a plain node.
+// as a dtalgorand node without time travel refuses it (400), rather than
+// answered with the latest state by a plain node.
 func TestTimeTravelRefusedWithoutHistoryNode(t *testing.T) {
 	h := newHarnessWith(t, DirectoryOptions{}, algodhttp.Factory{})
 	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 20})
@@ -739,7 +740,7 @@ func TestTimeTravelRefusedWithoutHistoryNode(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/accounts/ADDR?round=5", nil))
-	if rec.Code != 503 {
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "requires EnableTimeTravel") {
 		t.Fatalf("historical request without history node: %d %s", rec.Code, rec.Body.String())
 	}
 	if n := b.Hits("/v2/accounts"); n != 0 {

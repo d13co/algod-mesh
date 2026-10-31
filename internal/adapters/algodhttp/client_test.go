@@ -52,16 +52,17 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 		t.Fatalf("stock simulate limits: %v %+v", err, lim)
 	}
 	want := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 4, MaxExtraOpcodeBudget: 640000, ResourceLimitMultiplier: 2, TimeLimitSeconds: 64}
-	dt := fakealgod.New(fakealgod.Options{ID: "dt", StartRound: 5, Simulate: &want})
+	dt := fakealgod.New(fakealgod.Options{ID: "dt", StartRound: 5, Simulate: &want, TimeTravel: true})
 	defer dt.Close()
-	if lim, err := New(dt.URL(), dt.Token(), nil).Capabilities(ctx); err != nil || lim == nil || *lim != want {
-		t.Fatalf("dtalgorand simulate limits: %v %+v", err, lim)
+	if lim, err := New(dt.URL(), dt.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != want ||
+		!lim.TimeTravel || lim.DeveloperAPI {
+		t.Fatalf("dtalgorand capabilities: %v %+v", err, lim)
 	}
 	withQuery := want
 	withQuery.Query = domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 64 << 20, MaxRounds: 16}
 	dq := fakealgod.New(fakealgod.Options{ID: "dq", StartRound: 5, Simulate: &withQuery})
 	defer dq.Close()
-	if lim, err := New(dq.URL(), dq.Token(), nil).Capabilities(ctx); err != nil || lim == nil || *lim != withQuery {
+	if lim, err := New(dq.URL(), dq.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != withQuery {
 		t.Fatalf("dtalgorand query limits: %v %+v", err, lim)
 	}
 	bad := New(n.URL(), "wrong", nil)

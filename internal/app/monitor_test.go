@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,5 +204,40 @@ func TestMonitorReadsCapabilities(t *testing.T) {
 	m, _ = run(fakealgod.Options{ID: "ov", StartRound: 50, Simulate: &lim}, &domain.CapabilityOverrides{Simulate: &pinned})
 	if got := m.State().Caps.Simulate; got == nil || *got != pinned {
 		t.Fatalf("overridden limits %+v, want %+v", got, pinned)
+	}
+}
+
+// warnLog counts warnings.
+type warnLog struct {
+	logging.Nop
+	warns atomic.Int32
+}
+
+func (l *warnLog) Warn(string, ...any) { l.warns.Add(1) }
+
+// The agent warns once when the running node's time travel or developer API
+// differs from its config.json, and again only when that changes.
+func TestMonitorWarnsConfigNotRunning(t *testing.T) {
+	log := &warnLog{}
+	m := NewMonitor(MonitorOptions{NodeID: "dt"}, nil, nil, clock.Real{}, log, metrics.New())
+	m.update(func(s *LocalState) {
+		s.ConfigOK = true
+		s.Config.EnableTimeTravel = true
+	})
+	running := &ports.NodeCapabilities{TimeTravel: true}
+	m.checkConfigRunning(running)
+	if n := log.warns.Load(); n != 0 {
+		t.Fatalf("%d warnings for a node that runs its file", n)
+	}
+	running.TimeTravel = false // the file turned it on; the node was not restarted
+	m.checkConfigRunning(running)
+	m.checkConfigRunning(running)
+	if n := log.warns.Load(); n != 1 {
+		t.Fatalf("%d warnings, want 1", n)
+	}
+	running.DeveloperAPI = true
+	m.checkConfigRunning(running)
+	if n := log.warns.Load(); n != 2 {
+		t.Fatalf("%d warnings after a new difference, want 2", n)
 	}
 }
