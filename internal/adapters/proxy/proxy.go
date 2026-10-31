@@ -72,16 +72,18 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
 			out.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), time.Now())
-			if t.OnResponse != nil {
-				t.OnResponse(resp.StatusCode, resp.Header)
-			}
 			if t.Check != nil {
 				msg := peekMessage(resp)
 				if !t.Check(resp.StatusCode, resp.Header, msg) {
+					// Withheld before OnResponse: no client gets this answer,
+					// so its reported work is not billed to one.
 					out.Message, out.Refused = msg, true
 					resp.Body.Close()
 					return upstreamRejected{resp.StatusCode}
 				}
+			}
+			if t.OnResponse != nil {
+				t.OnResponse(resp.StatusCode, resp.Header)
 			}
 			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
 				if readMessage(resp) {

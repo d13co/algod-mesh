@@ -46,16 +46,19 @@ func TestClassify(t *testing.T) {
 		{method: "POST", path: "/v2/participation", want: RequestClass{LocalOnly: true}},
 		// Time travel: ?round= on state endpoints is only answerable from
 		// the history; a plain node would ignore it and answer "latest".
-		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/assets/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/applications/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/applications/42/box", query: "name=str:k&round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/accounts/ADDR/assets/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/accounts/ADDR/applications/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
-		{method: "GET", path: "/v2/ledger/supply", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
+		{method: "GET", path: "/v2/assets/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/box", query: "name=str:k&round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/assets/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/applications/42", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
+		{method: "GET", path: "/v2/ledger/supply", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
 		{method: "GET", path: "/v2/ledger/supply", want: RequestClass{LocalOnly: true, Idempotent: true}},
+		// Pending transactions by address take no round: the node answers
+		// without the round mark, so it isn't checked for one.
+		{method: "GET", path: "/v2/accounts/ADDR/transactions/pending", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
 		// A malformed pair must not hide a well-formed round.
-		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100&x=%zz", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100&x=%zz", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, RoundMarked: true, Idempotent: true}},
 		// A box listing takes round on a plain node within its account-state
 		// lookback, so a time-travel node merely extends its range.
 		{method: "GET", path: "/v2/applications/42/boxes", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, Idempotent: true, Boxes: true}},
@@ -68,7 +71,7 @@ func TestClassify(t *testing.T) {
 		// dtalgorand's holders index: the latest round, or any of the history.
 		{method: "GET", path: "/v2/assets/42/holders", want: RequestClass{TimeTravel: true, Holders: true, Idempotent: true}},
 		{method: "GET", path: "/v2/assets/42/holders", query: "round=100&limit=5", want: RequestClass{Round: u64(100), RoundWindow: WindowState,
-			HistoryAnyRound: true, TimeTravel: true, Holders: true, Idempotent: true}},
+			HistoryAnyRound: true, TimeTravel: true, Holders: true, RoundMarked: true, Idempotent: true}},
 		{method: "GET", path: "/v2/assets/42/holders/", want: RequestClass{TimeTravel: true, Holders: true, Idempotent: true}},
 		// No other method has the route, and a longer path is another route.
 		{method: "POST", path: "/v2/assets/42/holders", query: "round=100"},
