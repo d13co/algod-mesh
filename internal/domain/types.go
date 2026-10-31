@@ -63,6 +63,15 @@ type Capabilities struct {
 	// HoldersIndex is a time-travel node with TimeTravelHoldersIndex, so it
 	// answers GET /v2/assets/{asset-id}/holders, once its index is built.
 	HoldersIndex bool `json:"holders_index,omitempty"`
+	// HistoryUntrusted is a time-travel node whose history was found to
+	// differ from the chain: it answers no ?round= read, history page or
+	// holders page (503 "the time travel history is not served") until its
+	// store is replaced, and the rest as a stock node does. The agent's probe
+	// sets it.
+	HistoryUntrusted bool `json:"history_untrusted,omitempty"`
+	// TTRoundHeader is a time-travel node that marks its answers at a round
+	// with X-Algod-TT-Round, as the agent's probe found.
+	TTRoundHeader bool `json:"tt_round_header,omitempty"`
 	// Simulate is what the node allows in a simulate request, as dtalgorand
 	// reports it at GET /v2/transactions/simulate/limits. nil is a stock
 	// algod (or an agent too old to ask): one transaction group, no rounds
@@ -433,6 +442,10 @@ type Stats struct {
 	// ttimport fixes with the node stopped. No holders page goes to it for
 	// a while, while the rest still do.
 	HoldersMissing bool `json:"holders_missing,omitempty"`
+	// HistoryUntrusted is a time-travel node that answered a request with
+	// dtalgorand's 503 for a history that differs from the chain: as
+	// Capabilities.HistoryUntrusted, learned from the answer, for a while.
+	HistoryUntrusted bool `json:"history_untrusted,omitempty"`
 }
 
 // Upstream is one candidate the router chooses between. It is a value
@@ -458,6 +471,13 @@ type Upstream struct {
 	Source string `json:"source,omitempty"`
 	// Score is filled by the selector for status output only.
 	Score float64 `json:"score,omitempty"`
+}
+
+// ServesHistory reports whether u answers from its time-travel history right
+// now: a time-travel node whose history is not known to be untrusted. One
+// that is answers as a stock node does.
+func (u Upstream) ServesHistory() bool {
+	return u.Caps.TimeTravel && !u.Caps.HistoryUntrusted && !u.Stats.HistoryUntrusted
 }
 
 // Mode selects the routing policy.

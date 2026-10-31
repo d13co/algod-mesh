@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,8 +22,14 @@ type MonitorOptions struct {
 	StatusTimeout  time.Duration
 	MaxBackoff     time.Duration
 	VerifyInterval time.Duration // empirical re-check of oldest round
-	ConfigRecheck  time.Duration // how often config.json's mtime is polled
-	Overrides      *domain.CapabilityOverrides
+	// HistoryProbeInterval is how often a time-travel node is asked whether
+	// it serves its history (probeHistory). The node can stop or start
+	// serving it without a restart (a replay that finds a problem, a reload
+	// after a catchup), and until a peer knows, its requests fail with the
+	// node's usual errors rather than the 503 the router learns from.
+	HistoryProbeInterval time.Duration
+	ConfigRecheck        time.Duration // how often config.json's mtime is polled
+	Overrides            *domain.CapabilityOverrides
 	// Absent means there is no co-located node (a balancer): the monitor
 	// only reports Network as the genesis id and never goes online.
 	Absent  bool
@@ -48,6 +57,9 @@ func (o *MonitorOptions) defaults() {
 	}
 	if o.ConfigRecheck == 0 {
 		o.ConfigRecheck = time.Minute
+	}
+	if o.HistoryProbeInterval == 0 {
+		o.HistoryProbeInterval = time.Minute
 	}
 }
 
@@ -83,6 +95,8 @@ type Monitor struct {
 	state   LocalState
 	changed chan struct{}
 	verify  chan struct{} // request an empirical verification
+
+	probed bool // probeHistory has had an answer; only verifyLoop touches it
 }
 
 // NewMonitor wires the monitor; nothing runs until Run.
@@ -189,6 +203,7 @@ func capsFromConfig(cfg ports.NodeConfig, prev domain.Capabilities, lastRound ui
 		TimeTravel: cfg.EnableTimeTravel, HoldersIndex: cfg.HoldersIndex(),
 		GenesisID: cfg.GenesisID, StorageEngine: cfg.StorageEngine, MaxAcctLookback: cfg.MaxAcctLookback,
 		AlgodVersion: prev.AlgodVersion, Simulate: prev.Simulate,
+		HistoryUntrusted: prev.HistoryUntrusted, TTRoundHeader: prev.TTRoundHeader,
 	}
 	switch {
 	case cfg.Archival:
@@ -199,7 +214,11 @@ func capsFromConfig(cfg ports.NodeConfig, prev domain.Capabilities, lastRound ui
 		c.Archival = domain.Archival{Kind: domain.ArchivalNone}
 	}
 	c.OldestRound = domain.OldestRoundFor(c.Archival, lastRound)
-	return ov.Apply(c, lastRound)
+	c = ov.Apply(c, lastRound)
+	if !c.TimeTravel {
+		c.HistoryUntrusted, c.TTRoundHeader = false, false // what the probe found is about the history
+	}
+	return c
 }
 
 func (m *Monitor) configLoop(ctx context.Context) {
@@ -322,15 +341,20 @@ func (m *Monitor) requestVerify() {
 func (m *Monitor) verifyLoop(ctx context.Context) {
 	tick, stop := m.clock.Tick(m.opts.VerifyInterval)
 	defer stop()
+	probe, stopProbe := m.clock.Tick(m.opts.HistoryProbeInterval)
+	defer stopProbe()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-m.verify:
 			m.verifyOldest(ctx, true)
+			m.probeHistory(ctx)
 		case <-tick:
 			m.verifyOldest(ctx, false)
 			m.refreshLimits(ctx)
+		case <-probe:
+			m.probeHistory(ctx)
 		}
 	}
 }
@@ -464,6 +488,57 @@ func (b *backoff) next() time.Duration {
 }
 
 func (b *backoff) reset() { b.cur = 0 }
+
+// probeHistory reads one account at the node's last round, when it has the
+// time-travel history, to learn whether the node marks its answers at a
+// round with X-Algod-TT-Round, and whether it serves its history at all: a
+// node that found its history differs from the chain answers 503 until its
+// store is replaced. A refusal says nothing about the header, which only
+// accepted rounds carry, so what was found before is kept.
+func (m *Monitor) probeHistory(ctx context.Context) {
+	st := m.State()
+	if !st.Online || st.LastRound == 0 || !st.Caps.TimeTravel {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
+	defer cancel()
+	ans, err := m.algod.RoundProbe(ctx, st.LastRound)
+	if err != nil {
+		m.log.Debug("history probe failed", "err", err)
+		return
+	}
+	var untrusted, header bool
+	switch {
+	case ans.Status == http.StatusOK || ans.Status == http.StatusNotFound:
+		header = ans.TTRound == strconv.FormatUint(st.LastRound, 10)
+	case ans.Status == http.StatusServiceUnavailable && strings.Contains(ans.Message, historyNotServed):
+		untrusted = true
+	default:
+		m.log.Debug("history probe answered", "status", ans.Status, "message", ans.Message)
+		return
+	}
+	var before domain.Capabilities
+	m.update(func(s *LocalState) {
+		if !s.Caps.TimeTravel {
+			return
+		}
+		before = s.Caps
+		s.Caps.HistoryUntrusted = untrusted
+		if !untrusted {
+			s.Caps.TTRoundHeader = header
+		}
+	})
+	switch {
+	case untrusted && !before.HistoryUntrusted:
+		m.log.Warn("the node does not serve its time travel history: its store differs from the chain and must be replaced", "reason", ans.Message)
+	case !untrusted && before.HistoryUntrusted:
+		m.log.Info("the node serves its time travel history again")
+	}
+	if !untrusted && !header && (before.TTRoundHeader || !m.probed) {
+		m.log.Info("the node does not mark answers at a round with " + domain.TTRoundHeader + ": a dtalgorand from before it, or a node that ignores round")
+	}
+	m.probed = true
+}
 
 // refreshLimits reads the simulate limits again, for an algod restarted with
 // a new config without the agent seeing it go away.

@@ -3,6 +3,8 @@
 package proxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +38,11 @@ func New(rt http.RoundTripper) *Forwarder {
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 0, // the router bounds requests with its context
 			ForceAttemptHTTP2:     false,
+			// Pass the client's Accept-Encoding as it is. Asking for gzip on a
+			// client's behalf would make every answer's length unknown (the
+			// transport decompresses it on the fly), and the router could no
+			// longer read the message of a small error answer.
+			DisableCompression: true,
 		}
 	}
 	return &Forwarder{transport: rt, RetryableStatus: map[int]bool{502: true, 503: true, 504: true}}
@@ -68,9 +75,17 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 			if t.OnResponse != nil {
 				t.OnResponse(resp.StatusCode, resp.Header)
 			}
+			if t.Check != nil {
+				msg := peekMessage(resp)
+				if !t.Check(resp.StatusCode, resp.Header, msg) {
+					out.Message = msg
+					resp.Body.Close()
+					return upstreamRejected{resp.StatusCode}
+				}
+			}
 			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
 				if readMessage(resp) {
-					out.Message = errorMessage(resp.Body)
+					out.Message = errorMessage(resp.Body, resp.Header.Get("Content-Encoding"))
 				}
 				resp.Body.Close()
 				return upstreamRejected{resp.StatusCode}
@@ -130,13 +145,48 @@ func readMessage(resp *http.Response) bool {
 	return resp.StatusCode == http.StatusServiceUnavailable && resp.ContentLength > 0 && resp.ContentLength <= maxErrorBody
 }
 
+// peekMessage reads the message of a small error answer for Target.Check
+// and puts the body back, so that the answer can still be copied to the
+// client. Any other answer is left unread, as "".
+func peekMessage(resp *http.Response) string {
+	if resp.StatusCode < 400 || resp.ContentLength <= 0 || resp.ContentLength > maxErrorBody {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(b), resp.Body), resp.Body}
+	return messageOf(b, resp.Header.Get("Content-Encoding"))
+}
+
 // errorMessage reads the "message" of algod's JSON error body, "" when
-// there is none.
-func errorMessage(body io.Reader) string {
+// there is none. algod gzips every answer to a client that accepts it, its
+// errors included, so a gzip body is decompressed first.
+func errorMessage(body io.Reader, encoding string) string {
+	b, _ := io.ReadAll(io.LimitReader(body, maxErrorBody))
+	return messageOf(b, encoding)
+}
+
+// messageOf reads the "message" of a JSON error body read whole, in the
+// given Content-Encoding (identity or gzip), "" when there is none.
+func messageOf(b []byte, encoding string) string {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(b))
+		if err != nil {
+			return ""
+		}
+		if b, err = io.ReadAll(io.LimitReader(zr, maxErrorBody)); err != nil {
+			return ""
+		}
+	default:
+		return ""
+	}
 	var e struct {
 		Message string `json:"message"`
 	}
-	b, _ := io.ReadAll(io.LimitReader(body, maxErrorBody))
 	if json.Unmarshal(b, &e) != nil {
 		return ""
 	}
