@@ -251,3 +251,22 @@ func TestMonitorSkipsHistoryProbeOnStockNode(t *testing.T) {
 		t.Fatalf("stock node probed %d times", h)
 	}
 }
+
+// The history probe runs on its own interval, so a node that stops serving
+// its history without a restart is noticed then, not on the next verify.
+func TestMonitorProbesHistoryOnInterval(t *testing.T) {
+	const probePath = "/v2/accounts/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+	n := fakealgod.New(fakealgod.Options{ID: "tt", StartRound: 5000, OldestRound: 4000, TimeTravel: true})
+	defer n.Close()
+	m := NewMonitor(MonitorOptions{NodeID: "tt", WaitTimeout: time.Second, HistoryProbeInterval: 20 * time.Millisecond},
+		algodhttp.New(n.URL(), n.Token(), nil), fakealgod.ConfigReader{Node: n, Lookback: 1000}, clock.Real{}, logging.Nop{}, metrics.New())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return m.State().Caps.TTRoundHeader })
+	n.SetPathStatus(probePath, 503)
+	n.SetPathMessage(probePath, "the time travel history is not served: a replay found a problem")
+	waitFor(t, 5*time.Second, func() bool { return m.State().Caps.HistoryUntrusted })
+	n.SetPathStatus(probePath, 0)
+	waitFor(t, 5*time.Second, func() bool { return !m.State().Caps.HistoryUntrusted })
+}

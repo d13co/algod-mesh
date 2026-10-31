@@ -201,3 +201,29 @@ func TestForwardWithheldMessageGzip(t *testing.T) {
 		t.Fatalf("message of an unknown encoding: %q", m)
 	}
 }
+
+// Check reads a gzip answer's message through the compression, and an
+// accepted one reaches the client still compressed, byte for byte.
+func TestForwardCheckGzip(t *testing.T) {
+	const msg = "given round is no longer available"
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	zw.Write([]byte(`{"message":"` + msg + `"}`))
+	zw.Close()
+	body := z.Bytes()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(400)
+		w.Write(body)
+	}))
+	defer up.Close()
+	var seen string
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	out := New(nil).Forward(rec, req, ports.Target{BaseURL: up.URL,
+		Check: func(_ int, _ http.Header, m string) bool { seen = m; return true }})
+	if out.Failed() || seen != msg || rec.Code != 400 || !bytes.Equal(rec.Body.Bytes(), body) || rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("outcome %+v seen %q, client got %d %q", out, seen, rec.Code, rec.Body.Bytes())
+	}
+}
