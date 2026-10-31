@@ -1427,9 +1427,11 @@ func (s *statusWriter) begin(code int) {
 	s.cors()
 }
 
-// exposedHeaders are the mesh's own that a browser client may read: where
-// its answer came from, and what it cost and has left.
-const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", X-Algod-Mesh-Upstream, X-Algod-Mesh-Tier"
+// exposedHeaders are those a browser client may read: the mesh's own (where
+// its answer came from, and what it cost and has left), and those dtalgorand
+// exposes, as the list replaces the node's.
+const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", X-Algod-Mesh-Upstream, X-Algod-Mesh-Tier, " +
+	domain.EffortHeader + ", " + domain.TTRoundHeader
 
 // cors runs as the final headers go out, after any upstream's were copied
 // in: Set leaves one Access-Control-Allow-Origin where a proxied algod

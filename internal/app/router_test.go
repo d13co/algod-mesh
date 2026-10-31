@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -866,5 +867,35 @@ func TestExcludedPeerAheadDoesNotMakeOthersLag(t *testing.T) {
 	}
 	if n := h.ext.Hits("/"); n != 0 {
 		t.Fatalf("external hit %d times", n)
+	}
+}
+
+// A browser on another origin can read the headers dtalgorand exposes, as
+// well as the mesh's own: the mesh's list replaces the node's.
+func TestCORSExposesNodeHeaders(t *testing.T) {
+	f := newSimFleet(t, domain.Capabilities{Simulate: &testLimits, TimeTravel: true})
+	f.b.SetEffort("/v2/status", "opcodes=0, lookups=1, history=0, scanned=0, response-bytes=0")
+	req := httptest.NewRequest(http.MethodGet, "/v2/status", nil)
+	req.Header.Set("Origin", "https://dapp.example")
+	rec := httptest.NewRecorder()
+	f.r.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	if v := rec.Header().Values("Access-Control-Allow-Origin"); len(v) != 1 || v[0] != "*" {
+		t.Fatalf("Access-Control-Allow-Origin %q", v)
+	}
+	exposed := rec.Header().Values("Access-Control-Expose-Headers")
+	if len(exposed) != 1 {
+		t.Fatalf("Access-Control-Expose-Headers %q", exposed)
+	}
+	for _, h := range []string{"Retry-After", "X-Algod-Mesh-Upstream", domain.EffortHeader, domain.TTRoundHeader} {
+		if !slices.Contains(strings.Split(exposed[0], ", "), h) {
+			t.Errorf("%s not exposed: %q", h, exposed[0])
+		}
+	}
+	// With no limiter, the node's figures reach the client.
+	if rec.Header().Get(domain.EffortHeader) == "" {
+		t.Errorf("effort header dropped with no limiter")
 	}
 }
