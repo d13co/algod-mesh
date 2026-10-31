@@ -130,7 +130,7 @@ What changes for clients: the agent endpoints are `/mesh/*` instead of `/loadb/*
 On each host, in bash or sh (not fish), as a user with sudo:
 
 ```sh
-# 1. Note what runs now: the user (pass it to setup if it isn't algorand) and the agents.
+# 1. Note what runs now: the user (pass it to setup if it isn't the algod data dir's owner) and the agents.
 grep -h '^User=' /etc/systemd/system/algod-loadb-mesh*.service
 units=$(find /etc/systemd/system -name 'algod-loadb-mesh*.service' ! -name 'algod-loadb-mesh@.service' -printf '%f\n' | sort -u)
 echo $units    # algod-loadb-mesh.service and/or algod-loadb-mesh@NAME.service
@@ -212,7 +212,8 @@ The bundle contains the sync key. Anyone who has it can read every node's algod 
 `algod-mesh-setup -h` and `algod-mesh-autoconfig -h` list every option. By default:
 
 - **node id**: the hostname, minus `.local` (`--id`)
-- **algod data dir**: detected; it asks when there are several (`--data-dir`)
+- **algod data dir**: running `algod` and `dtalgod` nodes, `$ALGORAND_DATA`, `$DTALGORAND_DATA` and the usual locations (`/var/lib/algorand`, `/var/lib/dtalgorand`, `/var/lib/dtalgorand_NETWORK`, ...); it asks when there are several, and labels the dtalgorand ones (`EnableTimeTravel` in `config.json`) (`--data-dir`)
+- **service user**: the user the agents on the host already run as, else the owner of the data dir (`dtalgorand` for a dtalgorand node), so the agent can read the node's tokens and `config.json`; else `algorand`, else root (`--user`)
 - **client token**: the node's own `algod.token`, so clients keep their current token (`--client-token-file`)
 - **addresses**: every `10.112.*`/`10.114.*` interface, else a public one (`--address`). Clients and gossip are served on all of them and peers are told about all of them.
 - **ports**: 4000/tcp for clients and 4001/udp for gossip, or the next free pair if [other agents](#several-algods-on-one-host) run on the host (`--client-port`, `--mesh-port`)
@@ -237,7 +238,7 @@ sudo algod-mesh-setup --instance testnet --data-dir /var/lib/algorand/testnet - 
 | `local.id` | hostname | `HOSTNAME-NAME` |
 | registry cache | `/var/lib/algod-mesh/registry.cache` | `/var/lib/algod-mesh/NAME.registry.cache` |
 
-Setup gives each agent the first client and gossip ports no other agent in `/etc/algod-mesh` binds: 4000/4001, then 4002/4003, and so on (`--client-port` and `--mesh-port` choose them). It leaves out of detection the data dirs other agents already serve, and refuses a config that shares a data dir, a port, a node id or a registry cache with one of them. A `--force` re-run keeps the agent's ports while they are free. Run without `--instance` and with a `--data-dir` other than the one `config.yaml` serves, it stops and suggests a name instead of replacing that config (without `--data-dir`, it keeps `config.yaml` as always). All agents on a host run as one user, so a different `--user` is refused while other agents exist. Every `*.yaml` in `/etc/algod-mesh` counts as an agent's config: setup stops on one that does not load.
+Setup gives each agent the first client and gossip ports no other agent in `/etc/algod-mesh` binds: 4000/4001, then 4002/4003, and so on (`--client-port` and `--mesh-port` choose them). It leaves out of detection the data dirs other agents already serve, and refuses a config that shares a data dir, a port, a node id or a registry cache with one of them. A `--force` re-run keeps the agent's ports while they are free. Run without `--instance` and with a `--data-dir` other than the one `config.yaml` serves, it stops and suggests a name instead of replacing that config (without `--data-dir`, it keeps `config.yaml` as always). All agents on a host run as one user, so a different `--user` is refused while other agents exist, and an agent added for another node (a dtalgorand one beside a stock algod, say) runs as the first agent's user; setup warns when that user cannot read the node's `algod.token`. Every `*.yaml` in `/etc/algod-mesh` counts as an agent's config: setup stops on one that does not load.
 
 Each agent belongs to the fleet of its own network, so it takes that fleet's bundle; two agents of one network join the same fleet with the same bundle. The other commands take the instance's config, for example `algod-mesh registry bundle -config /etc/algod-mesh/testnet.yaml` and `systemctl status algod-mesh@testnet`. Package upgrades restart every running agent.
 

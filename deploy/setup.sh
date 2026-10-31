@@ -14,8 +14,9 @@
 #                    (4000/4001, else 4002/4003, ...)
 #   --force          replace an existing config
 #   --no-start       install everything, but do not enable or start the service
-#   --user USER      user the service runs as (default: algorand, or root when
-#                    there is no algorand user)
+#   --user USER      user the service runs as (default: the user the agents on
+#                    this host already run as, else the owner of the algod
+#                    data dir, else algorand, else root)
 #
 # Anything else is passed to autoconfig, which detects what it can and takes
 # the registry app id and sync key from the bundle printed by
@@ -38,7 +39,7 @@ main() {
 	REF=${REF:-stable}
 	local state_dir=${STATE_DIR:-/var/lib/algod-mesh}
 	local unit=${UNIT:-/etc/systemd/system/algod-mesh.service}
-	local config="" force="" start=1 user="" instance="" autoconfig=()
+	local config="" force="" start=1 user="" instance="" autoconfig=() keep=""
 
 	local arg
 	for arg in "$@"; do
@@ -89,7 +90,8 @@ main() {
 	# Every agent on the host runs as one user: named instances share the
 	# template unit, and all share the config and state dirs, which setup
 	# hands to that user. With other agents here, another user could no
-	# longer read their configs. Without --user, the one already set stays.
+	# longer read their configs. Without --user, the one already set stays;
+	# with none set, it is picked once the data dir is known.
 	local template u
 	template=$(dirname "$unit")/algod-mesh@.service
 	for f in "$unit" "$template"; do
@@ -102,17 +104,7 @@ main() {
 			die "--user $user: $f runs as $u, and the agents on this host share one user"
 		fi
 	done
-	if [ -z "$user" ]; then
-		user=algorand
-		id -u "$user" >/dev/null 2>&1 || user=root
-	fi
-	id -u "$user" >/dev/null 2>&1 || die "no such user: $user"
-	local group
-	group=$(id -gn "$user")
-
-	# --- directories --------------------------------------------------------
-
-	install -d -m 0750 -o "$user" -g "$group" "$CONFIG_DIR" "$state_dir"
+	[ -z "$user" ] || id -u "$user" >/dev/null 2>&1 || die "no such user: $user"
 
 	# --- other agents on this host --------------------------------------------
 
@@ -150,7 +142,7 @@ main() {
 			die "$target already serves $I_DIR; to add an agent for $want_dir: --instance ${hint:-NAME} (--force replaces it instead)"
 		fi
 		check_clash "$target"
-		say "keeping the config at $target (--force replaces it; --instance NAME adds an agent for another algod)"
+		keep=1
 	else
 		# Not local: the EXIT trap runs after main returns.
 		tmp=$(mktemp)
@@ -190,6 +182,23 @@ main() {
 		fi
 		"$mesh" config check -config "$tmp" || die "fix the config and run this again"
 		check_clash "$tmp"
+	fi
+
+	# --- user and directories -----------------------------------------------
+
+	# check_clash left the config's data dir in I_DIR.
+	[ -n "$user" ] || user=$(default_user "$I_DIR")
+	local group
+	group=$(id -gn "$user")
+	# The agent reads the node's tokens and config.json.
+	if [ -n "$I_DIR" ] && [ "$user" != root ] && [ -e "$I_DIR/algod.token" ] && command -v runuser >/dev/null &&
+		! runuser -u "$user" -- test -r "$I_DIR/algod.token" 2>/dev/null; then
+		say "warning: $user cannot read $I_DIR/algod.token, which the agent needs"
+	fi
+	install -d -m 0750 -o "$user" -g "$group" "$CONFIG_DIR" "$state_dir"
+	if [ -n "$keep" ]; then
+		say "keeping the config at $target (--force replaces it; --instance NAME adds an agent for another algod)"
+	else
 		# The config holds the sync key: only the service user reads it.
 		install -m 0600 -o "$user" -g "$group" "$tmp" "$target"
 		say "wrote $target"
@@ -243,6 +252,22 @@ main() {
 	else
 		systemctl --no-pager --lines=20 status "$svc" || true
 		die "the service did not start"
+	fi
+}
+
+# default_user DIR prints the user to run the service as when nothing chose
+# one: the owner of DIR, the algod data dir (the agent reads its tokens and
+# config.json), else algorand, else root.
+default_user() {
+	local u=""
+	[ -z "$1" ] || u=$(stat -c %U "$1" 2>/dev/null) || u=""
+	# stat prints UNKNOWN for a uid with no name.
+	if [ -n "$u" ] && [ "$u" != UNKNOWN ] && id -u "$u" >/dev/null 2>&1; then
+		echo "$u"
+	elif id -u algorand >/dev/null 2>&1; then
+		echo algorand
+	else
+		echo root
 	fi
 }
 
@@ -367,4 +392,5 @@ fetch() {
 	fi
 }
 
-main "$@"
+# Sourced (by the tests): only define the functions.
+(return 0 2>/dev/null) || main "$@"
