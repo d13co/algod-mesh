@@ -63,3 +63,47 @@ func TestVersionsPastEveryNodeAnswersAsAlgod(t *testing.T) {
 		t.Fatalf("the nodes saw %d pages past their round", n)
 	}
 }
+
+// Only the time-travel nodes count for a versions page: one behind a stock
+// node that is further along gets algod's 400, not a 503.
+func TestVersionsPastTimeTravelNodesBehindStock(t *testing.T) {
+	f := newSimFleetDir(t, domain.Capabilities{}, RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1, SyncTolerance: 20},
+		DirectoryOptions{SyncTolerance: 20})
+	f.h.inject(addrA, signedHeartbeat(t, f.h.peerKey, "b", 2, 90, domain.Capabilities{TimeTravel: true, MaxAcctLookback: 4}))
+	waitFor(t, 2*time.Second, func() bool {
+		cands, _ := f.h.d.Snapshot()
+		for _, u := range cands {
+			if u.ID == "b" {
+				return u.Caps.TimeTravel && u.LastRound == 90 && u.Health.Reachable()
+			}
+		}
+		return false
+	})
+	rec := f.do(http.MethodGet, versionsPath+"?max-round=95", nil)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "given round is greater than the latest round") {
+		t.Fatalf("versions past the time-travel nodes: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// With no time-travel node, a versions page past the stock nodes hears that
+// the fleet has none, not that the round is ahead.
+func TestVersionsPastStockFleetNeedsTimeTravel(t *testing.T) {
+	f := newSimFleet(t, domain.Capabilities{})
+	rec := f.do(http.MethodGet, versionsPath+"?max-round=101", nil)
+	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "needs a time-travel node") {
+		t.Fatalf("versions on a stock fleet: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Only GET has a versions route: another method past the fleet goes to a
+// node, which answers it, rather than getting the mesh's 400.
+func TestVersionsPostPastEveryNodeReachesANode(t *testing.T) {
+	f := versionsFleet(t)
+	rec := f.do(http.MethodPost, versionsPath+"?max-round=101", nil)
+	if rec.Code == 400 {
+		t.Fatalf("POST versions past every node: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := f.b.Hits(versionsPath) + f.c.Hits(versionsPath); n == 0 {
+		t.Fatal("no node saw the POST")
+	}
+}

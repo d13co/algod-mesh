@@ -521,7 +521,9 @@ func Classify(method, path, rawQuery string) RequestClass {
 	if seg(len(segs)-1) == "versions" {
 		c.TimeTravel = true
 		c.Versions = true
-		if hi, ok := versionsHigh(q); ok {
+		// Only GET has a route: any other method gets algod's 405 from
+		// every node, so Ahead stays unset.
+		if hi, ok := versionsHigh(q); ok && method == "GET" {
 			c.RoundHigh = hi
 			c.Ahead = Reply{400, "given round is greater than the latest round"}
 		}

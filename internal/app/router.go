@@ -669,7 +669,7 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 		// No reachable node has the round yet: answer as algod does. best
 		// may count an external whose check has since expired, so the
 		// candidates are measured instead; 0 means nothing is reachable.
-		if top := domain.BestRound(cands); class.Ahead.Status != 0 && top > 0 && class.HighestRound() > top {
+		if top := aheadTop(cands, class); class.Ahead.Status != 0 && top > 0 && class.HighestRound() > top {
 			writeMessage(w, class.Ahead.Status, class.Ahead.Message)
 			return
 		}
@@ -677,6 +677,24 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 		return
 	}
 	r.forwardSelected(ctx, w, req, class, sel)
+}
+
+// aheadTop is the latest round of the reachable candidates that could
+// answer class but for its round. A time-travel request counts only the
+// nodes with the history: a stock node ahead of them would otherwise turn
+// algod's answer into a 503, and with no such node the router says the
+// fleet has none. Other classes are served by any node.
+func aheadTop(cands []domain.Upstream, class domain.RequestClass) uint64 {
+	if !class.TimeTravel {
+		return domain.BestRound(cands)
+	}
+	tt := make([]domain.Upstream, 0, len(cands))
+	for _, u := range cands {
+		if u.Caps.TimeTravel {
+			tt = append(tt, u)
+		}
+	}
+	return domain.BestRound(tt)
 }
 
 // forwardNow is handleDefault for a request whose wait is over, under a

@@ -91,6 +91,8 @@ func TestClassify(t *testing.T) {
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30,", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30&rounds=500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		// Only GET has the route: every node answers another method 405.
+		{method: "POST", path: "/v2/accounts/ADDR/versions", query: "max-round=500", want: RequestClass{TimeTravel: true, Versions: true}},
 		// A malformed pair must not hide a well-formed max-round.
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "max-round=500&x=%zz", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
 			RoundHigh: 500, Ahead: versionsAhead}},

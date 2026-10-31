@@ -306,7 +306,7 @@ A node built from the time-travel fork (`EnableTimeTravel` in `config.json`) kee
 
 The agent detects the capability and sends it in its heartbeats, so a mixed fleet starts routing correctly as soon as the agents hear each other. If a round sits right at the edge of a stock node's window, the agent prefers a time-travel node, because the stock node may already have moved past it. To declare the capability on a node the agent can't inspect, set `time_travel: true` under `local.overrides`, `tiers.external[].capabilities`, or a static record's `declared`.
 
-A `.../versions` history page that ends at a round, `max-round` or the latest of `rounds`, goes only to a time-travel node that has reached that round, even one lagging behind the fleet, so a client following a page from a fresher node does not land on one that answers 400. When no node has reached it, the router answers as dtalgorand does: 400 `given round is greater than the latest round`.
+A `.../versions` history page that ends at a round, `max-round` or the latest of `rounds`, goes only to a time-travel node that has reached that round, even one lagging behind the fleet, so a client following a page from a fresher node does not land on one that answers 400. When no time-travel node has reached it, the router answers as dtalgorand does: 400 `given round is greater than the latest round`, even for a page with other errors (a bad `limit`, say) that a node would report first.
 
 ### dtalgorand simulate
 
