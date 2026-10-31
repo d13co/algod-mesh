@@ -669,7 +669,7 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 		// No reachable node has the round yet: answer as algod does. best
 		// may count an external whose check has since expired, so the
 		// candidates are measured instead; 0 means nothing is reachable.
-		if top := domain.BestRound(cands); class.Ahead.Status != 0 && top > 0 && *class.Round > top {
+		if top := domain.BestRound(cands); class.Ahead.Status != 0 && top > 0 && class.HighestRound() > top {
 			writeMessage(w, class.Ahead.Status, class.Ahead.Message)
 			return
 		}

@@ -74,7 +74,8 @@ type RequestClass struct {
 	// RoundHigh is the latest round a simulate or query request's "rounds"
 	// lists: a node must have reached it too, while Round, the earliest, is
 	// the one its window must cover. 0 when the request names at most one
-	// round.
+	// round. On a versions page it is max-round or the last of rounds, with
+	// Round unset: the history covers every round before it.
 	RoundHigh uint64
 	// SimulateLimits marks GET /v2/transactions/simulate/limits, which the
 	// router answers for the fleet (dtalgorand).
@@ -353,6 +354,15 @@ type Reply struct {
 	Message string
 }
 
+// HighestRound is the latest round the request names, Round or RoundHigh;
+// 0 when it names none.
+func (c RequestClass) HighestRound() uint64 {
+	if c.Round != nil {
+		return max(*c.Round, c.RoundHigh)
+	}
+	return c.RoundHigh
+}
+
 // String renders the class for logs.
 func (c RequestClass) String() string {
 	var parts []string
@@ -511,6 +521,10 @@ func Classify(method, path, rawQuery string) RequestClass {
 	if seg(len(segs)-1) == "versions" {
 		c.TimeTravel = true
 		c.Versions = true
+		if hi, ok := versionsHigh(q); ok {
+			c.RoundHigh = hi
+			c.Ahead = Reply{400, "given round is greater than the latest round"}
+		}
 		return c
 	}
 	switch seg(1) {
@@ -634,6 +648,33 @@ func Classify(method, path, rawQuery string) RequestClass {
 		c.LocalOnly = true // admin API is never proxied to other nodes
 	}
 	return c
+}
+
+// versionsHigh returns the last round a versions page reads: max-round, or
+// the largest of rounds, which dtalgorand takes as one comma-separated
+// value. A node that has not reached it answers 400. ok is false when the
+// page names no round past 0, and when every node rejects the query anyway:
+// a malformed or repeated value, or rounds with min-round or max-round.
+func versionsHigh(q url.Values) (uint64, bool) {
+	maxs, rounds := q["max-round"], q["rounds"]
+	var list []string
+	switch {
+	case rounds == nil && len(maxs) == 1:
+		list = maxs
+	case len(rounds) == 1 && maxs == nil && q["min-round"] == nil:
+		list = strings.Split(rounds[0], ",")
+	default:
+		return 0, false
+	}
+	var hi uint64
+	for _, s := range list {
+		r, ok := parseRound(s)
+		if !ok {
+			return 0, false
+		}
+		hi = max(hi, r)
+	}
+	return hi, hi > 0
 }
 
 // queryValues parses a raw query string. url.ParseQuery returns every valid
