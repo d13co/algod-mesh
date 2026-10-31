@@ -61,6 +61,7 @@ type Node struct {
 	rejecting bool // every broadcast answers 400, as algod does for a rejected transaction
 	omitTT    bool // answers at a round lack X-Algod-TT-Round, as an older dtalgorand's do
 	latency   time.Duration
+	ttValue   string // X-Algod-TT-Round on answers at a round, in place of the round; "" for the round
 	// simulate requests: how long one runs, and what it answers instead
 	simDelay      time.Duration
 	simStatus     int
@@ -144,6 +145,15 @@ func (n *Node) SetOmitTTRound(f bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.omitTT = f
+}
+
+// SetTTRoundValue makes a time-travel node mark its answers at a round
+// with v instead of the round asked for, as a node answering another round
+// would; "" restores the round.
+func (n *Node) SetTTRoundValue(v string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.ttValue = v
 }
 
 // SetHang makes every request block until its client gives up (true), as
@@ -293,7 +303,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	p := strings.TrimSuffix(r.URL.Path, "/")
 	n.mu.Lock()
-	status, effort, retry, msg, omitTT := n.pathStatus[p], n.effort[p], n.pathRetry[p], n.pathMessage[p], n.omitTT
+	status, effort, retry, msg, omitTT, ttValue := n.pathStatus[p], n.effort[p], n.pathRetry[p], n.pathMessage[p], n.omitTT, n.ttValue
 	n.mu.Unlock()
 	if effort != "" {
 		w.Header().Set("X-Algod-Effort", effort)
@@ -310,6 +320,9 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if rs := r.URL.Query().Get("round"); rs != "" && n.opts.TimeTravel && !omitTT {
 		// dtalgorand marks every answer given at an accepted round.
+		if ttValue != "" {
+			rs = ttValue
+		}
 		w.Header().Set(domain.TTRoundHeader, rs)
 	}
 	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")

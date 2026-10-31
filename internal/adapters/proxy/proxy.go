@@ -72,7 +72,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 			if t.Check != nil {
 				msg := peekMessage(resp)
 				if !t.Check(resp.StatusCode, resp.Header, msg) {
-					out.Message = msg
+					out.Message, out.Refused = msg, true
 					resp.Body.Close()
 					return upstreamRejected{resp.StatusCode}
 				}

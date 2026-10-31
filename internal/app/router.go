@@ -457,12 +457,20 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	if t, ok := ctx.Value(ticketKey{}).(*Ticket); ok {
 		target.OnResponse = r.effortReader(t, u)
 	}
-	if class.Boxes && class.Round != nil && u.ServesHistory() {
+	switch {
+	case class.Boxes && class.Round != nil && u.ServesHistory():
 		// A box listing at a round outside the node's memory is refused
 		// with a 400 when its history is untrusted: withheld, so that
 		// another node answers it.
 		target.Check = func(status int, _ http.Header, msg string) bool {
 			return !boxesRoundGone(class, ports.Outcome{Status: status, Message: msg})
+		}
+	case class.TimeTravel && class.Round != nil && u.Caps.TTRoundHeader:
+		// The node marks what it answers at a round; an answer without the
+		// mark ignored the round, and goes to no client that asked for one.
+		want := strconv.FormatUint(*class.Round, 10)
+		target.Check = func(status int, h http.Header, msg string) bool {
+			return honorsRound(status, h, msg, want)
 		}
 	}
 	out := r.fwd.Forward(w, req.WithContext(ctx), target)
@@ -478,6 +486,13 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		r.stats.HistoryUntrusted(u.ID, historyUntrustedFor)
 		r.metric.Inc("mesh_upstream_history_untrusted", "upstream", u.ID)
 		r.log.Warn("upstream does not serve its time travel history", "upstream", u.ID, "reason", out.Message)
+	case roundUnhonored(class, out):
+		// The node answered as of another round, likely its latest: it gets
+		// no request at a round for a while, and the rest as before.
+		r.stats.RoundUnhonored(u.ID, roundUnhonoredFor)
+		r.metric.Inc("mesh_upstream_round_unhonored", "upstream", u.ID)
+		r.log.Warn("upstream ignored the round of a request: its answer lacks "+domain.TTRoundHeader+" with that round",
+			"upstream", u.ID, "round", *class.Round, "status", out.Status)
 	case boxIndexMissing(class, out):
 		// The node's box index does not reach back to the page's range. A
 		// page with a later range may still be served, so it is not passed
@@ -585,6 +600,34 @@ const roundGone = "given round is no longer available"
 // node is tried again; the agent's probe reports it sooner.
 const historyUntrustedFor = 5 * time.Minute
 
+// honorsRound reports whether an answer to a request at round want shows the
+// node answered as of that round: dtalgorand marks every answer given at an
+// accepted round, the 200 and the 404 "not found at R" included. Other
+// errors, such as refusals of the round and malformed requests, carry no
+// mark and are the client's. So is a 404 for a path no node routes (echo's
+// plain "Not Found"): it holds at every round, and every node would give it.
+func honorsRound(status int, h http.Header, msg, want string) bool {
+	if status/100 != 2 && status != http.StatusNotFound || status == http.StatusNotFound && msg == "Not Found" {
+		return true
+	}
+	return h.Get(domain.TTRoundHeader) == want
+}
+
+// roundUnhonored reports an answer to a request at a round that its node
+// should have marked with the round and did not (see forward).
+func roundUnhonored(class domain.RequestClass, out ports.Outcome) bool {
+	return out.Refused && class.TimeTravel && class.Round != nil
+}
+
+// roundUnhonoredFor is how long a node that ignored a request's round is
+// held to a stock node's windows. It is not failing, and its other answers
+// stand, but a node that ignores round does not soon start to honour it.
+const roundUnhonoredFor = 10 * time.Minute
+
+// roundUnhonoredMessage answers a request at a round when every node tried
+// answered without that round.
+const roundUnhonoredMessage = "algod-mesh: no node tried answered as of the requested round: each answer lacked " + domain.TTRoundHeader
+
 // boxIndexMissing reports dtalgorand's answer to an app's boxes history
 // page whose range starts before the node's box index does: a 503 that
 // says how to build the index.
@@ -617,6 +660,11 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	}
 	if (class.TimeTravel || class.Boxes && class.Round != nil) && allHistoryUntrusted(cands) {
 		writeMessage(w, 503, historyUntrustedMessage)
+		return
+	}
+	if class.TimeTravel && class.Round != nil && noneServesHistory(cands) {
+		// Some answered without the round lately, the rest are untrusted.
+		writeMessage(w, 503, "algod-mesh: no time-travel node answers as of a round for now: they answered without the round asked for")
 		return
 	}
 	if class.Holders {
@@ -695,9 +743,26 @@ func allHoldersMissing(us []domain.Upstream) bool {
 }
 
 // allHistoryUntrusted reports whether every candidate that is not excluded
-// and has the time-travel history is known not to serve it, and there is at
-// least one.
+// and has the time-travel history is known to have an untrusted one, and
+// there is at least one.
 func allHistoryUntrusted(us []domain.Upstream) bool {
+	n := 0
+	for _, u := range us {
+		if !u.Caps.TimeTravel || u.Excluded {
+			continue
+		}
+		if !u.Caps.HistoryUntrusted && !u.Stats.HistoryUntrusted {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// noneServesHistory reports whether no candidate that is not excluded and
+// has the time-travel history serves it right now, and there is at least
+// one.
+func noneServesHistory(us []domain.Upstream) bool {
 	n := 0
 	for _, u := range us {
 		if !u.Caps.TimeTravel || u.Excluded {
@@ -934,6 +999,8 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 		} else {
 			writeMessage(w, 503, "algod-mesh: the time travel history is not served on the nodes tried")
 		}
+	case roundUnhonored(class, out):
+		writeMessage(w, 503, roundUnhonoredMessage)
 	case boxIndexMissing(class, out):
 		writeMessage(w, 503, "algod-mesh: no node tried has a box index for this range; the last said: "+out.Message)
 	case holdersMissing(class, out):

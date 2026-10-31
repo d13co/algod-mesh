@@ -40,10 +40,15 @@ func newSimFleetWith(t *testing.T, cCaps domain.Capabilities, o RouterOptions) *
 	return newSimFleetDir(t, cCaps, o, DirectoryOptions{})
 }
 
-func newSimFleetDir(t *testing.T, cCaps domain.Capabilities, o RouterOptions, do DirectoryOptions) *simFleet {
+// newSimFleetDir builds the fleet; bOpts, if any, change b's fake node.
+func newSimFleetDir(t *testing.T, cCaps domain.Capabilities, o RouterOptions, do DirectoryOptions, bOpts ...func(*fakealgod.Options)) *simFleet {
 	t.Helper()
 	h := newHarnessWith(t, do, algodhttp.Factory{})
-	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 100})
+	bo := fakealgod.Options{ID: "b", StartRound: 100}
+	for _, f := range bOpts {
+		f(&bo)
+	}
+	b := fakealgod.New(bo)
 	t.Cleanup(b.Close)
 	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 100, Simulate: cCaps.Simulate, TimeTravel: cCaps.TimeTravel})
 	t.Cleanup(c.Close)

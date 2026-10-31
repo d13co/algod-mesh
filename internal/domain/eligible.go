@@ -5,8 +5,8 @@ package domain
 //
 // The rules, in order: not excluded by config; reachable; not draining;
 // breaker closed; not throttled, nor busy for the request's slot; a
-// time-travel history not known to be untrusted when the request needs it
-// (a node whose history is untrusted is held to a stock node's windows), and
+// time-travel history not known to be untrusted, nor ignored, when the
+// request needs it (such a node is held to a stock node's windows), and
 // the asset holders index, not known to be missing; synced (within tolerance of best) unless the class is
 // local-only or the request is for a specific round the node holds; the
 // round is in the window the class needs (block or account state), and

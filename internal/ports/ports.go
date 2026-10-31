@@ -161,6 +161,8 @@ type Outcome struct {
 	// sends it, or of an answer Target.Check withheld; "" when there is
 	// none, or it is not short with a declared length.
 	Message string
+	// Refused is true when Target.Check withheld the answer.
+	Refused bool
 }
 
 // Failed is true when the outcome should count against the upstream.
