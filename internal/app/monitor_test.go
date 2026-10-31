@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -207,13 +209,17 @@ func TestMonitorReadsCapabilities(t *testing.T) {
 	}
 }
 
-// warnLog counts warnings.
+// warnLog counts warnings about config.json.
 type warnLog struct {
 	logging.Nop
 	warns atomic.Int32
 }
 
-func (l *warnLog) Warn(string, ...any) { l.warns.Add(1) }
+func (l *warnLog) Warn(msg string, _ ...any) {
+	if strings.Contains(msg, "config.json") {
+		l.warns.Add(1)
+	}
+}
 
 // The agent warns once when the running node's time travel or developer API
 // differs from its config.json, and again only when that changes.
@@ -240,4 +246,49 @@ func TestMonitorWarnsConfigNotRunning(t *testing.T) {
 	if n := log.warns.Load(); n != 2 {
 		t.Fatalf("%d warnings after a new difference, want 2", n)
 	}
+}
+
+// editedConfig is a config.json that a test edits.
+type editedConfig struct {
+	fakealgod.ConfigReader
+	mu      sync.Mutex
+	edited  bool
+	modTime time.Time
+}
+
+func (c *editedConfig) Read() (ports.NodeConfig, error) {
+	cfg, err := c.ConfigReader.Read()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cfg.ModTime = c.modTime
+	cfg.EnableTimeTravel = cfg.EnableTimeTravel || c.edited
+	return cfg, err
+}
+
+// enableTimeTravel edits the file to turn time travel on.
+func (c *editedConfig) enableTimeTravel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.edited, c.modTime = true, c.modTime.Add(time.Second)
+}
+
+// An edit of config.json is compared with the running node as soon as the
+// agent sees it, not at the next verify interval.
+func TestMonitorWarnsConfigEditPromptly(t *testing.T) {
+	lim := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 1}
+	n := fakealgod.New(fakealgod.Options{ID: "dt", StartRound: 50, Simulate: &lim})
+	t.Cleanup(n.Close)
+	cfg := &editedConfig{ConfigReader: fakealgod.ConfigReader{Node: n}, modTime: time.Unix(1000, 0)}
+	log := &warnLog{}
+	m := NewMonitor(MonitorOptions{NodeID: "dt", WaitTimeout: time.Minute, ConfigRecheck: 20 * time.Millisecond, VerifyInterval: time.Hour},
+		algodhttp.New(n.URL(), n.Token(), nil), cfg, clock.Real{}, log, metrics.New())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go m.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return m.State().Online && m.State().LimitsKnown })
+	if w := log.warns.Load(); w != 0 {
+		t.Fatalf("%d warnings for a node that runs its file", w)
+	}
+	cfg.enableTimeTravel()
+	waitFor(t, time.Second, func() bool { return log.warns.Load() == 1 })
 }

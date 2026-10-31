@@ -336,7 +336,7 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	}
 	w.Header().Set("X-Algod-Mesh-Mode", string(r.opts.Mode))
 	if class.Capabilities {
-		if lim, ok := domain.FleetCapabilities(cands, best, r.opts.SyncTolerance); ok {
+		if lim, ok := domain.FleetCapabilities(cands, best, r.opts.SyncTolerance, r.opts.UpstreamTimeout); ok {
 			writeJSON(w, http.StatusOK, lim)
 			return
 		}
@@ -553,12 +553,16 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	}
 	// A fleet without the feature answers as one dtalgorand node without it
 	// does, so that clients (go-dtalgorand-sdk) see the fleet doesn't
-	// support the request rather than a 503 to retry.
-	if class.Holders && !anyCaps(cands, func(c domain.Capabilities) bool { return c.HoldersIndex }) {
+	// support the request rather than a 503 to retry. Clients keep that
+	// answer, so it is given only when every node is known to lack the
+	// feature: one that is down, or not heard from yet, may have it.
+	holders := func(c domain.Capabilities) bool { return c.HoldersIndex }
+	timeTravel := func(c domain.Capabilities) bool { return c.TimeTravel }
+	if class.Holders && fleetLacks(cands, holders) {
 		writeMessage(w, 400, noHoldersIndexMessage)
 		return
 	}
-	if class.TimeTravel && !anyTimeTravel(cands) {
+	if class.TimeTravel && fleetLacks(cands, timeTravel) {
 		if class.Versions {
 			// The node registers the versions routes only with time travel.
 			writeMessage(w, 404, noVersionsMessage)
@@ -567,8 +571,15 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 		}
 		return
 	}
+	if class.TimeTravel && !anyTimeTravel(cands) {
+		writeMessage(w, 503, "algod-mesh: this request needs a time-travel node and none is available now")
+		return
+	}
 	if class.Holders {
 		switch {
+		case !anyCaps(cands, holders):
+			writeMessage(w, 503, "algod-mesh: this request needs a node with TimeTravelHoldersIndex and none is available now")
+			return
 		case allHoldersMissing(cands):
 			writeMessage(w, 503, holdersMissingMessage)
 			return
@@ -620,6 +631,24 @@ func anyCaps(us []domain.Upstream, has func(domain.Capabilities) bool) bool {
 		}
 	}
 	return false
+}
+
+// fleetLacks reports whether every candidate that is not excluded is known
+// to lack capabilities that satisfy has, counting what a node that is out
+// last had, and there is at least one. A node whose capabilities are
+// unknown may have them, and so may the nodes of a fleet not yet heard of.
+func fleetLacks(us []domain.Upstream, has func(domain.Capabilities) bool) bool {
+	n := 0
+	for _, u := range us {
+		if u.Excluded {
+			continue
+		}
+		if c, ok := u.KnownCaps(); !ok || has(c) {
+			return false
+		}
+		n++
+	}
+	return n > 0
 }
 
 // allHoldersMissing reports whether every candidate that is not excluded
