@@ -177,13 +177,28 @@ func TestFleetCapabilities(t *testing.T) {
 	if got != want {
 		t.Fatalf("dominant node: %+v, want %+v", got, want)
 	}
-	// Equal limits: time travel breaks the tie.
-	tied := []Upstream{
-		{ID: "a", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small}},
-		{ID: "b", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small, TimeTravel: true}},
+	// Time travel and the developer API are the fleet's, not only the
+	// simulate node's: the larger node lacks both, a smaller one has them.
+	mixed := []Upstream{
+		{ID: "large", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &big}},
+		{ID: "history", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small, TimeTravel: true}},
+		{ID: "dev", Health: HealthSynced, LastRound: 100, Caps: Capabilities{DeveloperAPI: true}},
 	}
-	if got, _ := FleetCapabilities(tied, 100, 2); !got.TimeTravel {
-		t.Fatalf("tie: %+v", got)
+	got, _ = FleetCapabilities(mixed, 100, 2)
+	if !got.TimeTravel || !got.DeveloperAPI || got.Simulate.MaxTxnGroups != big.MaxTxnGroups {
+		t.Fatalf("mixed fleet: %+v", got)
+	}
+	// The time limit is the smallest set one; 0 is no limit.
+	limited := func(id string, secs uint64) Upstream {
+		l := small
+		l.TimeLimitSeconds = secs
+		return Upstream{ID: id, Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &l}}
+	}
+	if got, _ = FleetCapabilities([]Upstream{limited("a", 0), limited("b", 30), limited("c", 10)}, 100, 2); got.TimeLimitSeconds != 10 {
+		t.Fatalf("time limit %d, want 10", got.TimeLimitSeconds)
+	}
+	if got, _ = FleetCapabilities([]Upstream{limited("a", 0)}, 100, 2); got.TimeLimitSeconds != 0 {
+		t.Fatalf("no limit: %d", got.TimeLimitSeconds)
 	}
 	if _, ok := FleetCapabilities(us[:1], 100, 2); ok {
 		t.Fatal("a fleet of stock nodes reported limits")

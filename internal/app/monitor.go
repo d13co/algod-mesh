@@ -73,6 +73,7 @@ type LocalState struct {
 type Monitor struct {
 	opts            MonitorOptions
 	warnedTimeLimit atomic.Uint64 // the time limit last checked against UpstreamTimeout
+	warnedConfig    atomic.Uint32 // checkConfigRunning's last finding
 	algod           ports.AlgodClient
 	cfgr            ports.NodeConfigReader
 	clock           ports.Clock
@@ -486,14 +487,43 @@ func (m *Monitor) refreshLimits(ctx context.Context) {
 func (m *Monitor) simulateLimits(ctx context.Context) (*domain.SimulateLimits, error) {
 	ctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
 	defer cancel()
-	lim, err := m.algod.Capabilities(ctx)
-	if err == nil && lim != nil && m.warnedTimeLimit.Swap(lim.TimeLimitSeconds) != lim.TimeLimitSeconds {
+	nc, err := m.algod.Capabilities(ctx)
+	if err != nil || nc == nil {
+		return nil, err
+	}
+	lim := nc.Limits
+	if m.warnedTimeLimit.Swap(lim.TimeLimitSeconds) != lim.TimeLimitSeconds {
 		if limit := time.Duration(lim.TimeLimitSeconds) * time.Second; limit > 0 && m.opts.UpstreamTimeout > 0 && limit >= m.opts.UpstreamTimeout {
 			m.log.Warn("the node's simulate time limit is not below routing.upstream_timeout: the agent gives up on a long simulation first, and the client gets the agent's 504 instead of the node's",
 				"time_limit", limit, "upstream_timeout", m.opts.UpstreamTimeout)
 		}
 	}
-	return lim, err
+	m.checkConfigRunning(nc)
+	return &lim, nil
+}
+
+// checkConfigRunning warns, once per change, when the running node's time
+// travel or developer API differs from its config.json: algod reads its
+// config only at start, so an edit takes effect on restart, and until then
+// the agent advertises what the file says.
+func (m *Monitor) checkConfigRunning(nc *ports.NodeCapabilities) {
+	st := m.State()
+	if !st.ConfigOK {
+		return
+	}
+	var differs uint32 = 1 // set, so that "no difference" is remembered too
+	if nc.TimeTravel != st.Config.EnableTimeTravel {
+		differs |= 2
+	}
+	if nc.DeveloperAPI != st.Config.EnableDeveloperAPI {
+		differs |= 4
+	}
+	if m.warnedConfig.Swap(differs) == differs || differs == 1 {
+		return
+	}
+	m.log.Warn("the running node's config differs from its config.json, which it reads only at start: restart it to apply the file; until then the agent advertises the file's values",
+		"time_travel_running", nc.TimeTravel, "time_travel_file", st.Config.EnableTimeTravel,
+		"developer_api_running", nc.DeveloperAPI, "developer_api_file", st.Config.EnableDeveloperAPI)
 }
 
 // fmtLimits renders the simulate limits for the log.
