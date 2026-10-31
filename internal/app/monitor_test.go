@@ -205,3 +205,49 @@ func TestMonitorReadsSimulateLimits(t *testing.T) {
 		t.Fatalf("overridden limits %+v, want %+v", got, pinned)
 	}
 }
+
+// The agent probes a time-travel node at its last round: whether it marks
+// answers at a round with X-Algod-TT-Round, and whether its history is
+// untrusted. A refusal keeps what was found about the header.
+func TestMonitorProbesHistory(t *testing.T) {
+	const probePath = "/v2/accounts/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+	n := fakealgod.New(fakealgod.Options{ID: "tt", StartRound: 5000, OldestRound: 4000, TimeTravel: true})
+	defer n.Close()
+	m := NewMonitor(MonitorOptions{NodeID: "tt", WaitTimeout: time.Second},
+		algodhttp.New(n.URL(), n.Token(), nil), fakealgod.ConfigReader{Node: n, Lookback: 1000}, clock.Real{}, logging.Nop{}, metrics.New())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return m.State().Caps.TTRoundHeader })
+
+	n.SetPathStatus(probePath, 503)
+	n.SetPathMessage(probePath, "the time travel history is not served: the node's own round 90 differs from its evaluation")
+	m.requestVerify()
+	waitFor(t, 5*time.Second, func() bool { return m.State().Caps.HistoryUntrusted })
+	if !m.State().Caps.TTRoundHeader {
+		t.Fatal("a refusal dropped the header capability")
+	}
+
+	n.SetPathStatus(probePath, 0)
+	n.SetOmitTTRound(true)
+	m.requestVerify()
+	waitFor(t, 5*time.Second, func() bool { c := m.State().Caps; return !c.HistoryUntrusted && !c.TTRoundHeader })
+}
+
+// A node without the history is never probed.
+func TestMonitorSkipsHistoryProbeOnStockNode(t *testing.T) {
+	n := fakealgod.New(fakealgod.Options{ID: "s", StartRound: 5000, OldestRound: 4000})
+	defer n.Close()
+	m := NewMonitor(MonitorOptions{NodeID: "s", WaitTimeout: time.Second},
+		algodhttp.New(n.URL(), n.Token(), nil), fakealgod.ConfigReader{Node: n, Lookback: 1000}, clock.Real{}, logging.Nop{}, metrics.New())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return m.State().Verified })
+	if c := m.State().Caps; c.TTRoundHeader || c.HistoryUntrusted {
+		t.Fatalf("stock node caps: %+v", c)
+	}
+	if h := n.Hits("/v2/accounts/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"); h != 0 {
+		t.Fatalf("stock node probed %d times", h)
+	}
+}

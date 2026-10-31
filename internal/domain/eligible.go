@@ -4,9 +4,10 @@ package domain
 // the best round known across the fleet and the sync tolerance.
 //
 // The rules, in order: not excluded by config; reachable; not draining;
-// breaker closed; not throttled, nor busy for the request's slot; time-travel
-// history when the request needs it, and the asset holders index, not known
-// to be missing; synced (within tolerance of best) unless the class is
+// breaker closed; not throttled, nor busy for the request's slot; a
+// time-travel history not known to be untrusted when the request needs it
+// (a node whose history is untrusted is held to a stock node's windows), and
+// the asset holders index, not known to be missing; synced (within tolerance of best) unless the class is
 // local-only or the request is for a specific round the node holds; the
 // round is in the window the class needs (block or account state), and
 // every round a simulation lists has been reached; developer API
@@ -22,7 +23,8 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if c.LocalOnly && u.Kind != KindLocal {
 		return false
 	}
-	if c.TimeTravel && !u.Caps.TimeTravel {
+	tt := u.ServesHistory()
+	if c.TimeTravel && !tt {
 		return false
 	}
 	if c.Holders && (!u.Caps.HoldersIndex || u.Stats.HoldersMissing) {
@@ -34,9 +36,9 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 			return false
 		}
 		switch {
-		case u.Caps.TimeTravel && c.HistoryAnyRound:
+		case tt && c.HistoryAnyRound:
 			// The history covers every round at or before the node's last.
-		case u.Caps.TimeTravel:
+		case tt:
 			// History does not extend the block window here (state deltas,
 			// full blocks): the stored block is still required.
 			if r < u.Caps.OldestRound {
@@ -236,7 +238,7 @@ func FleetSimulateLimits(us []Upstream, bestRound, tolerance uint64) (FleetSimul
 	}
 	l := best.Caps.SimulateLimits()
 	reply := FleetSimulateLimitsReply{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds, MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget,
-		ResourceLimitMultiplier: multiplier, TimeTravel: best.Caps.TimeTravel, DeveloperAPI: best.Caps.DeveloperAPI,
+		ResourceLimitMultiplier: multiplier, TimeTravel: best.ServesHistory(), DeveloperAPI: best.Caps.DeveloperAPI,
 		TimeLimitSeconds: l.TimeLimitSeconds}
 	if bestQuery != nil {
 		q := bestQuery.Caps.QueryLimits()
@@ -256,8 +258,8 @@ func queryLimitsAbove(a, b Upstream) bool {
 		return la.MaxRounds > lb.MaxRounds
 	case la.MaxCallBudget != lb.MaxCallBudget:
 		return la.MaxCallBudget > lb.MaxCallBudget
-	case a.Caps.TimeTravel != b.Caps.TimeTravel:
-		return a.Caps.TimeTravel
+	case a.ServesHistory() != b.ServesHistory():
+		return a.ServesHistory()
 	}
 	return a.ID < b.ID
 }
@@ -273,8 +275,8 @@ func simulateLimitsAbove(a, b Upstream) bool {
 		return la.MaxRounds > lb.MaxRounds
 	case la.MaxExtraOpcodeBudget != lb.MaxExtraOpcodeBudget:
 		return la.MaxExtraOpcodeBudget > lb.MaxExtraOpcodeBudget
-	case a.Caps.TimeTravel != b.Caps.TimeTravel:
-		return a.Caps.TimeTravel
+	case a.ServesHistory() != b.ServesHistory():
+		return a.ServesHistory()
 	case a.Caps.DeveloperAPI != b.Caps.DeveloperAPI:
 		return a.Caps.DeveloperAPI
 	}

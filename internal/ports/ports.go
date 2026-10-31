@@ -41,6 +41,16 @@ type AlgodClient interface {
 	BoxNames(ctx context.Context, appID uint64) ([][]byte, error)
 	// Box returns a box value; ErrNotFound when absent.
 	Box(ctx context.Context, appID uint64, name []byte) ([]byte, error)
+	// RoundProbe reads one account at round with ?round=, to see how a
+	// time-travel node answers a request at a round.
+	RoundProbe(ctx context.Context, round uint64) (RoundAnswer, error)
+}
+
+// RoundAnswer is a node's answer to RoundProbe.
+type RoundAnswer struct {
+	Status  int
+	TTRound string // the X-Algod-TT-Round header, "" when absent
+	Message string // the error body's message, if any
 }
 
 // AlgodClientFactory builds clients for arbitrary endpoints (peers, externals).
@@ -131,6 +141,13 @@ type Target struct {
 	// before anything is decided or copied to the client, and may change
 	// the headers: the rate limiter reads and strips a node's effort.
 	OnResponse func(status int, h http.Header)
+	// Check, when set, sees each upstream answer after OnResponse, with the
+	// message of a small error answer ("" for any other), before anything
+	// is copied to the client. False withholds the answer, as a failure the
+	// router may try another upstream for: an answer that only looks like
+	// the client's, such as dtalgorand's 400 for a box listing at a round
+	// its untrusted history no longer holds.
+	Check func(status int, h http.Header, message string) bool
 }
 
 // Outcome is what happened when forwarding.
@@ -141,8 +158,8 @@ type Outcome struct {
 	Duration    time.Duration // as measured by the forwarder
 	RetryAfter  time.Duration // the upstream's Retry-After; 0 when absent
 	// Message is the "message" of a withheld 503's JSON error body, as algod
-	// sends it; "" when there is none, or it is not short with a declared
-	// length.
+	// sends it, or of an answer Target.Check withheld; "" when there is
+	// none, or it is not short with a declared length.
 	Message string
 }
 

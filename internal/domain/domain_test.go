@@ -58,7 +58,7 @@ func TestClassify(t *testing.T) {
 		{method: "GET", path: "/v2/accounts/ADDR", query: "round=100&x=%zz", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true, Idempotent: true}},
 		// A box listing takes round on a plain node within its account-state
 		// lookback, so a time-travel node merely extends its range.
-		{method: "GET", path: "/v2/applications/42/boxes", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, Idempotent: true}},
+		{method: "GET", path: "/v2/applications/42/boxes", query: "round=100", want: RequestClass{Round: u64(100), RoundWindow: WindowState, HistoryAnyRound: true, Idempotent: true, Boxes: true}},
 		// Object histories are registered only with EnableTimeTravel.
 		{method: "GET", path: "/v2/accounts/ADDR/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 		{method: "GET", path: "/v2/accounts/ADDR/assets/42/versions", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
@@ -131,6 +131,19 @@ func TestOverrideHoldersIndexImpliesTimeTravel(t *testing.T) {
 	if equalOverrides(&CapabilityOverrides{HoldersIndex: &yes}, &CapabilityOverrides{HoldersIndex: &no}) {
 		t.Fatal("overrides differing in holders_index compare equal")
 	}
+}
+
+// untrustedUp is a time-travel node with a 4-round lookback whose history is
+// untrusted, as its probe says (caps) or as an answer said (stats).
+func untrustedUp(caps bool) Upstream {
+	u := ttUp(5000, 4000)
+	u.Caps.MaxAcctLookback = 4
+	if caps {
+		u.Caps.HistoryUntrusted = true
+	} else {
+		u.Stats.HistoryUntrusted = true
+	}
+	return u
 }
 
 // stateUp is a synced peer with a chosen block window and account-state
@@ -214,6 +227,17 @@ func TestEligible(t *testing.T) {
 			RequestClass{TimeTravel: true, Holders: true}, 5000, false},
 		{"other history on a node missing its holders index", func() Upstream { u := holdersUp(); u.Stats.HoldersMissing = true; return u }(),
 			RequestClass{TimeTravel: true, Versions: true}, 5000, true},
+		// A node whose history is untrusted, by its probe or its answer,
+		// serves nothing from it and is held to a stock node's windows.
+		{"tt round on untrusted node", untrustedUp(false),
+			RequestClass{Round: u64(4500), RoundWindow: WindowState, HistoryAnyRound: true, TimeTravel: true}, 5000, false},
+		{"versions on untrusted node", untrustedUp(true), RequestClass{TimeTravel: true, Versions: true}, 5000, false},
+		{"old box listing on untrusted node", untrustedUp(true),
+			RequestClass{Round: u64(10), RoundWindow: WindowState, HistoryAnyRound: true}, 5000, false},
+		{"box listing in lookback on untrusted node", untrustedUp(false),
+			RequestClass{Round: u64(4998), RoundWindow: WindowState, HistoryAnyRound: true}, 5000, true},
+		{"delta in lookback on untrusted node", untrustedUp(true), RequestClass{Round: u64(4998), RoundWindow: WindowDelta}, 5000, true},
+		{"latest read on untrusted node", untrustedUp(false), RequestClass{}, 5000, true},
 	}
 	for _, tt := range tests {
 		if got := Eligible(tt.u, tt.c, tt.best, 0); got != tt.want {

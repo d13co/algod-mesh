@@ -62,6 +62,34 @@ func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
 	return resp.StatusCode, body, nil
 }
 
+// zeroAddress is the all-zero account, which exists on every network.
+const zeroAddress = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+
+// RoundProbe implements ports.AlgodClient: the zero account, without its
+// assets and apps, at round.
+func (c *Client) RoundProbe(ctx context.Context, round uint64) (ports.RoundAnswer, error) {
+	path := fmt.Sprintf("/v2/accounts/%s?exclude=all&round=%d", zeroAddress, round)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return ports.RoundAnswer{}, err
+	}
+	req.Header.Set("X-Algo-API-Token", c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ports.RoundAnswer{}, err
+	}
+	defer resp.Body.Close()
+	ans := ports.RoundAnswer{Status: resp.StatusCode, TTRound: resp.Header.Get(domain.TTRoundHeader)}
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Message string `json:"message"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e)
+		ans.Message = e.Message
+	}
+	return ans, nil
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, v any) ([]byte, error) {
 	code, body, err := c.get(ctx, path)
 	if err != nil {

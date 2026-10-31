@@ -128,3 +128,30 @@ func TestRetryAfter(t *testing.T) {
 		}
 	}
 }
+
+// Check sees a small error answer's message: a refused answer is withheld
+// with its message, an accepted one reaches the client whole.
+func TestForwardCheck(t *testing.T) {
+	const body = `{"message":"given round is no longer available"}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		w.Write([]byte(body))
+	}))
+	defer up.Close()
+	f := New(nil)
+	var seen string
+	check := func(accept bool) func(int, http.Header, string) bool {
+		return func(_ int, _ http.Header, msg string) bool { seen = msg; return accept }
+	}
+	rec := httptest.NewRecorder()
+	out := f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, Check: check(false)})
+	if out.Status != 400 || !out.Failed() || out.HeadersSent || out.Message != "given round is no longer available" || rec.Body.Len() != 0 {
+		t.Fatalf("refused: %+v body %q", out, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	out = f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, Check: check(true)})
+	if out.Failed() || !out.HeadersSent || rec.Code != 400 || rec.Body.String() != body || seen != "given round is no longer available" {
+		t.Fatalf("accepted: %+v %d %q seen %q", out, rec.Code, rec.Body.String(), seen)
+	}
+}

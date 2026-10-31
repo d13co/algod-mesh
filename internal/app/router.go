@@ -457,6 +457,14 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	if t, ok := ctx.Value(ticketKey{}).(*Ticket); ok {
 		target.OnResponse = r.effortReader(t, u)
 	}
+	if class.Boxes && class.Round != nil && u.ServesHistory() {
+		// A box listing at a round outside the node's memory is refused
+		// with a 400 when its history is untrusted: withheld, so that
+		// another node answers it.
+		target.Check = func(status int, _ http.Header, msg string) bool {
+			return !boxesRoundGone(class, ports.Outcome{Status: status, Message: msg})
+		}
+	}
 	out := r.fwd.Forward(w, req.WithContext(ctx), target)
 	release()
 	switch {
@@ -464,6 +472,17 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		// The client left, or its allowance ran out: nothing about the upstream.
 	case timeLimited && out.Status == http.StatusGatewayTimeout:
 		// dtalgorand's time limit on one request, not a failing node.
+	case historyUntrusted(class, out):
+		// The node's history differs from the chain: it answers nothing at a
+		// past round until its store is replaced, and the rest as before.
+		r.stats.HistoryUntrusted(u.ID, historyUntrustedFor)
+		r.metric.Inc("mesh_upstream_history_untrusted", "upstream", u.ID)
+		r.log.Warn("upstream does not serve its time travel history", "upstream", u.ID, "reason", out.Message)
+	case boxIndexMissing(class, out):
+		// The node's box index does not reach back to the page's range. A
+		// page with a later range may still be served, so it is not passed
+		// over: the next node is tried, and the node is not failing.
+		r.metric.Inc("mesh_upstream_box_index_missing", "upstream", u.ID)
 	case holdersMissing(class, out):
 		// The node's holders index is missing or stale: only ttimport, with
 		// the node stopped, builds it. Its other answers are unaffected.
@@ -535,6 +554,47 @@ const holdersIndexIncomplete = "holders index is not complete"
 // node is tried again.
 const holdersMissingFor = time.Minute
 
+// historyUntrusted reports dtalgorand's answer to a request at a round, a
+// history page or a holders page while its time-travel history is found to
+// differ from the chain: a 503 with ErrHistoryUntrusted's message, or the
+// 400 a box listing gets for a round outside the node's memory.
+func historyUntrusted(class domain.RequestClass, out ports.Outcome) bool {
+	return out.Status == http.StatusServiceUnavailable && strings.Contains(out.Message, historyNotServed) ||
+		boxesRoundGone(class, out)
+}
+
+// historyNotServed is in dtalgorand's message for ErrHistoryUntrusted.
+const historyNotServed = "the time travel history is not served"
+
+// boxesRoundGone reports dtalgorand's answer to a box listing at a round
+// outside its memory while its history is untrusted: algod's 400 for a
+// round past its lookback, which a node serving its history never gives.
+// Only a node that has the history is checked for it (see forward), and
+// out.Message is set only for an answer withheld from the client, so a
+// stock node's 400 reaches the client as before.
+func boxesRoundGone(class domain.RequestClass, out ports.Outcome) bool {
+	return class.Boxes && class.Round != nil && out.Status == http.StatusBadRequest && strings.Contains(out.Message, roundGone)
+}
+
+// roundGone is in algod's message for a round past its account lookback.
+const roundGone = "given round is no longer available"
+
+// historyUntrustedFor is how long a node that said its history is untrusted
+// is held to a stock node's windows. Only a new store, ttsnap verify
+// -clear-diverged or a restart clears it, so this only bounds how soon the
+// node is tried again; the agent's probe reports it sooner.
+const historyUntrustedFor = 5 * time.Minute
+
+// boxIndexMissing reports dtalgorand's answer to an app's boxes history
+// page whose range starts before the node's box index does: a 503 that
+// says how to build the index.
+func boxIndexMissing(class domain.RequestClass, out ports.Outcome) bool {
+	return class.Versions && out.Status == http.StatusServiceUnavailable && strings.Contains(out.Message, boxIndexHint)
+}
+
+// boxIndexHint is in dtalgorand's message for ErrNoBoxIndex.
+const boxIndexHint = "ttimport -index-boxes"
+
 // maxBusy bounds how long a busy node is passed over for requests of a slot,
 // whatever its Retry-After says.
 const maxBusy = 10 * time.Second
@@ -553,6 +613,10 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	}
 	if class.TimeTravel && !anyTimeTravel(cands) {
 		writeMessage(w, 503, "algod-mesh: this request needs a time-travel node and the fleet has none")
+		return
+	}
+	if (class.TimeTravel || class.Boxes && class.Round != nil) && allHistoryUntrusted(cands) {
+		writeMessage(w, 503, historyUntrustedMessage)
 		return
 	}
 	if class.Holders {
@@ -629,6 +693,27 @@ func allHoldersMissing(us []domain.Upstream) bool {
 	}
 	return n > 0
 }
+
+// allHistoryUntrusted reports whether every candidate that is not excluded
+// and has the time-travel history is known not to serve it, and there is at
+// least one.
+func allHistoryUntrusted(us []domain.Upstream) bool {
+	n := 0
+	for _, u := range us {
+		if !u.Caps.TimeTravel || u.Excluded {
+			continue
+		}
+		if u.ServesHistory() {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// historyUntrustedMessage answers a request at a past round when every
+// time-travel node has said its history differs from the chain.
+const historyUntrustedMessage = "algod-mesh: the time travel history is not served on any node that has it: its store differs from the chain and must be replaced"
 
 // holdersMissingMessage answers a holders page when every node with the
 // option has said its index is missing or stale.
@@ -843,6 +928,14 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 	case busy(class, out):
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(out.RetryAfter), 10))
 		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
+	case historyUntrusted(class, out):
+		if cands, _ := r.dir.Snapshot(); allHistoryUntrusted(cands) {
+			writeMessage(w, 503, historyUntrustedMessage)
+		} else {
+			writeMessage(w, 503, "algod-mesh: the time travel history is not served on the nodes tried")
+		}
+	case boxIndexMissing(class, out):
+		writeMessage(w, 503, "algod-mesh: no node tried has a box index for this range; the last said: "+out.Message)
 	case holdersMissing(class, out):
 		// The last node tried is missing its index. Say "every node" only
 		// when that is so: with a retry budget, some may not have been tried.

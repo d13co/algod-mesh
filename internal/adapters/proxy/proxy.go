@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,14 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 			if t.OnResponse != nil {
 				t.OnResponse(resp.StatusCode, resp.Header)
 			}
+			if t.Check != nil {
+				msg := peekMessage(resp)
+				if !t.Check(resp.StatusCode, resp.Header, msg) {
+					out.Message = msg
+					resp.Body.Close()
+					return upstreamRejected{resp.StatusCode}
+				}
+			}
 			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
 				if readMessage(resp) {
 					out.Message = errorMessage(resp.Body)
@@ -128,6 +137,27 @@ const maxErrorBody = 4 << 10
 // sent slowly or not at all never holds up the retry on another node.
 func readMessage(resp *http.Response) bool {
 	return resp.StatusCode == http.StatusServiceUnavailable && resp.ContentLength > 0 && resp.ContentLength <= maxErrorBody
+}
+
+// peekMessage reads the message of a small error answer for Target.Check
+// and puts the body back, so that the answer can still be copied to the
+// client. Any other answer is left unread, as "".
+func peekMessage(resp *http.Response) string {
+	if resp.StatusCode < 400 || resp.ContentLength <= 0 || resp.ContentLength > maxErrorBody {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(b), resp.Body), resp.Body}
+	var e struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(b, &e) != nil {
+		return ""
+	}
+	return e.Message
 }
 
 // errorMessage reads the "message" of algod's JSON error body, "" when
