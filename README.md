@@ -317,6 +317,8 @@ A node with `tt_round_header` marks every answer it gives as of the round of a `
 
 An app's boxes history page (`/v2/applications/{id}/boxes/versions`) whose range starts before a node's box index gets a 503 telling the operator to build the index with `ttimport -index-boxes`. The router sends the page to the next node without counting it against the first (metric `mesh_upstream_box_index_missing`). The node is not passed over, because a page with a later range may still be in its index. When no node tried has the range, the client gets a 503 with the last node's message.
 
+A `.../versions` history page that ends at a round, `max-round` or the latest of `rounds`, goes only to a time-travel node that has reached that round, even one lagging behind the fleet, so a client following a page from a fresher node does not land on one that answers 400. When no node has reached it, the router answers as dtalgorand does: 400 `given round is greater than the latest round`.
+
 ### dtalgorand simulate
 
 dtalgorand (the time-travel fork) extends `POST /v2/transactions/simulate` beyond what stock algod accepts: several transaction groups (`MaxAPISimulateGroups`) and a larger `extra-opcode-budget` (`MaxAPISimulateExtraOpcodeBudget`), and, until it moved them to `POST /v2/query`, one request at several rounds (`rounds`, `MaxAPISimulateRounds`) and the options `parallel-groups`, `skip-validity-window`, `rewrite-validity-window` and `protocol`. A stock node rejects such a request, so the router reads the body (JSON or msgpack) and sends it to a node that accepts it:
