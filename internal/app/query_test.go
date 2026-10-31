@@ -17,7 +17,7 @@ import (
 // testQueryLimits is a dtalgorand with POST /v2/query.
 var testQueryLimits = func() domain.SimulateLimits {
 	l := testLimits
-	l.Query = domain.QueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 1 << 20, MaxRounds: 4}
+	l.Query = domain.QueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRounds: 4}
 	return l
 }()
 
@@ -115,7 +115,7 @@ func TestQueryLimitsForFleet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := domain.FleetQueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 1 << 20, MaxRounds: 4}
+	want := domain.FleetQueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRounds: 4}
 	if got.Query == nil || *got.Query != want {
 		t.Fatalf("query limits %+v, want %+v", got.Query, want)
 	}

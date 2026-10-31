@@ -142,11 +142,14 @@ type SimulateLimits struct {
 // QueryLimits is what a dtalgorand node allows in one POST /v2/query
 // request. The fields mirror the limits response's query object.
 type QueryLimits struct {
-	MaxCalls         uint64 `json:"max_calls" yaml:"max_calls"` // 0: the node has no queries
-	MaxCallBudget    uint64 `json:"max_call_budget" yaml:"max_call_budget"`
-	MaxCallLogBytes  uint64 `json:"max_call_log_bytes,omitempty" yaml:"max_call_log_bytes,omitempty"` // 0: the protocol's
-	MaxResponseBytes uint64 `json:"max_response_bytes,omitempty" yaml:"max_response_bytes,omitempty"` // 0: no limit
-	MaxRounds        uint64 `json:"max_rounds" yaml:"max_rounds"`
+	MaxCalls        uint64 `json:"max_calls" yaml:"max_calls"` // 0: the node has no queries
+	MaxCallBudget   uint64 `json:"max_call_budget" yaml:"max_call_budget"`
+	MaxCallLogBytes uint64 `json:"max_call_log_bytes,omitempty" yaml:"max_call_log_bytes,omitempty"` // 0: the protocol's
+	// MaxCallStateBytes is the most ledger state one call may read; a call
+	// that reads more fails alone. 0: no limit, or a node from before it.
+	MaxCallStateBytes uint64 `json:"max_call_state_bytes,omitempty" yaml:"max_call_state_bytes,omitempty"`
+	MaxResponseBytes  uint64 `json:"max_response_bytes,omitempty" yaml:"max_response_bytes,omitempty"` // 0: no limit
+	MaxRounds         uint64 `json:"max_rounds" yaml:"max_rounds"`
 }
 
 // StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod

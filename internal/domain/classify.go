@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// TTRoundHeader is the round a dtalgorand node answered a ?round= request
+// at, on every answer given once it accepted the round, a 404 included.
+// Refusals of the round, requests without one, and stock algod don't carry
+// it.
+const TTRoundHeader = "X-Algod-TT-Round"
+
 // RoundWindow names the range in which a plain (non-time-travel) node can
 // answer a request for one specific round.
 type RoundWindow int

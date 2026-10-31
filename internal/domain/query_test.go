@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-var dtQuery = QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+var dtQuery = QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16}
 
 // queryCaps is a dtalgorand node with queries.
 func queryCaps() Capabilities {
@@ -182,7 +182,7 @@ func TestFleetQueryLimits(t *testing.T) {
 		Upstream{ID: "small", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small}},
 		Upstream{ID: "dt", Health: HealthSynced, LastRound: 100, Caps: queryCaps()})
 	got, _ = FleetSimulateLimits(us, 100, 2)
-	want := FleetQueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+	want := FleetQueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16}
 	if got.Query == nil || *got.Query != want {
 		t.Fatalf("query limits %+v, want %+v (one node's, the most calls)", got.Query, want)
 	}
