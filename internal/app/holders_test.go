@@ -73,12 +73,12 @@ func TestHoldersRouteToIndexedNode(t *testing.T) {
 	}
 }
 
-// A fleet with no node that enables the index says so, rather than letting a
-// stock node answer 404.
+// A fleet with no node that enables the index answers as a dtalgorand node
+// without it does (400), rather than letting a stock node answer 404.
 func TestHoldersWithoutIndexedNode(t *testing.T) {
 	f := newSimFleet(t, domain.Capabilities{TimeTravel: true})
 	rec := f.do(http.MethodGet, holdersPath, nil)
-	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "TimeTravelHoldersIndex") {
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "TimeTravelHoldersIndex") {
 		t.Fatalf("no holders node: %d %s", rec.Code, rec.Body.String())
 	}
 	if f.b.Hits(holdersPath)+f.c.Hits(holdersPath) != 0 {

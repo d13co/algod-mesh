@@ -76,9 +76,9 @@ type RequestClass struct {
 	// the one its window must cover. 0 when the request names at most one
 	// round.
 	RoundHigh uint64
-	// SimulateLimits marks GET /v2/transactions/simulate/limits, which the
-	// router answers for the fleet (dtalgorand).
-	SimulateLimits bool
+	// Capabilities marks GET /v2/capabilities, which the router answers for
+	// the fleet (dtalgorand).
+	Capabilities bool
 	// Versions marks an object history page (.../versions).
 	Versions bool
 	// Deltas marks GET /v2/deltas/{round}, which a time-travel node
@@ -614,15 +614,16 @@ func Classify(method, path, rawQuery string) RequestClass {
 			c.PendingID = seg(3)
 		case seg(2) == "pending":
 			c.LocalOnly = true // pool dump is only meaningful per node
-		case seg(2) == "simulate" && seg(3) == "limits":
-			// dtalgorand's limits: a GET, answered for the fleet by the router.
-			c.SimulateLimits = method == "GET"
-		case seg(2) == "simulate":
+		case seg(2) == "simulate" && seg(3) == "":
 			c.Idempotent = true
 			c.Simulate = true
 		case seg(2) == "params":
 			// suggested params: any synced node
 		}
+	case "capabilities":
+		// dtalgorand's features and limits: a GET, answered for the fleet by
+		// the router.
+		c.Capabilities = method == "GET" && seg(2) == ""
 	case "query":
 		// dtalgorand's read-only TEAL calls: POST only, with no subpath.
 		// Any other request has no route on any node.

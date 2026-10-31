@@ -247,8 +247,10 @@ func checkNodeCmd(args []string) error {
 	if v, err := client.Versions(ctx); err == nil {
 		report["algod_version"] = v.Build
 	}
-	if lim, err := client.SimulateLimits(ctx); err == nil && lim != nil {
-		report["simulate_limits"] = lim
+	if nc, err := client.Capabilities(ctx); err == nil && nc != nil {
+		report["simulate_limits"] = nc.Limits
+		report["running_time_travel"] = nc.TimeTravel
+		report["running_developer_api"] = nc.DeveloperAPI
 	}
 	if *probe {
 		oldest, err := app.ProbeOldestRound(ctx, client, st.LastRound)

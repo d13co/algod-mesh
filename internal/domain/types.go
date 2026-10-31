@@ -64,7 +64,7 @@ type Capabilities struct {
 	// answers GET /v2/assets/{asset-id}/holders, once its index is built.
 	HoldersIndex bool `json:"holders_index,omitempty"`
 	// Simulate is what the node allows in a simulate request, as dtalgorand
-	// reports it at GET /v2/transactions/simulate/limits. nil is a stock
+	// reports it at GET /v2/capabilities. nil is a stock
 	// algod (or an agent too old to ask): one transaction group, no rounds
 	// list, the upstream opcode budget limit and none of the fork's options.
 	Simulate        *SimulateLimits `json:"simulate,omitempty"`
@@ -122,8 +122,9 @@ func (o *CapabilityOverrides) Apply(c Capabilities, lastRound uint64) Capabiliti
 }
 
 // SimulateLimits is what a dtalgorand node allows in one simulate request.
-// The fields mirror GET /v2/transactions/simulate/limits; that response's
-// time-travel and developer-api are already Capabilities of their own.
+// The fields mirror the simulate object of GET /v2/capabilities, with that
+// response's time-limit-seconds; its time-travel and developer-api are
+// already Capabilities of their own.
 type SimulateLimits struct {
 	MaxTxnGroups            uint64 `json:"max_txn_groups" yaml:"max_txn_groups"`
 	MaxRounds               uint64 `json:"max_rounds" yaml:"max_rounds"` // 0: rounds is disabled
@@ -132,15 +133,15 @@ type SimulateLimits struct {
 	// TimeLimitSeconds caps one request's run time (504, or per-round errors
 	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
 	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
-	// Query is what the node allows in a POST /v2/query request, the limits
-	// response's query object. The zero value is a node without the
+	// Query is what the node allows in a POST /v2/query request, the
+	// capabilities response's query object. The zero value is a node without the
 	// endpoint: a stock algod, a dtalgorand from before it, or one with
 	// MaxAPIQueryCalls 0.
 	Query QueryLimits `json:"query,omitzero" yaml:"query,omitempty"`
 }
 
 // QueryLimits is what a dtalgorand node allows in one POST /v2/query
-// request. The fields mirror the limits response's query object.
+// request. The fields mirror the capabilities response's query object.
 type QueryLimits struct {
 	MaxCalls         uint64 `json:"max_calls" yaml:"max_calls"` // 0: the node has no queries
 	MaxCallBudget    uint64 `json:"max_call_budget" yaml:"max_call_budget"`
@@ -456,8 +457,29 @@ type Upstream struct {
 	// (agent silent, node answered directly), check (external health check)
 	// or none.
 	Source string `json:"source,omitempty"`
+	// LastCaps is, for an upstream with no live facts (Caps zero, so that
+	// nothing is routed on them), the capabilities it was last known to
+	// have: its last heartbeat's, else its declared ones. nil when none.
+	LastCaps *Capabilities `json:"-"`
+	// CapsUnknown is set when nothing is known of the upstream's
+	// capabilities: a peer never heard from, with none declared.
+	CapsUnknown bool `json:"caps_unknown,omitempty"`
 	// Score is filled by the selector for status output only.
 	Score float64 `json:"score,omitempty"`
+}
+
+// KnownCaps returns what the upstream is known to have, whether or not it
+// can serve now: Caps, or LastCaps for one that is out. ok is false when
+// nothing is known of it. It is for answers about the fleet's features,
+// never for routing.
+func (u Upstream) KnownCaps() (c Capabilities, ok bool) {
+	switch {
+	case u.CapsUnknown:
+		return Capabilities{}, false
+	case u.LastCaps != nil:
+		return *u.LastCaps, true
+	}
+	return u.Caps, true
 }
 
 // Mode selects the routing policy.

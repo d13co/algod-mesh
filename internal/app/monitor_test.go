@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,7 +169,7 @@ func TestStatsBreaker(t *testing.T) {
 	}
 }
 
-func TestMonitorReadsSimulateLimits(t *testing.T) {
+func TestMonitorReadsCapabilities(t *testing.T) {
 	lim := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 1}
 	run := func(o fakealgod.Options, ov *domain.CapabilityOverrides) (*Monitor, *fakealgod.Node) {
 		n := fakealgod.New(o)
@@ -190,7 +193,7 @@ func TestMonitorReadsSimulateLimits(t *testing.T) {
 	if m.State().Caps.Simulate == nil {
 		t.Fatal("limits dropped on round update")
 	}
-	if hits := n.Hits("/v2/transactions/simulate/limits"); hits != 1 {
+	if hits := n.Hits("/v2/capabilities"); hits != 1 {
 		t.Fatalf("limits asked %d times, want once", hits)
 	}
 
@@ -204,4 +207,88 @@ func TestMonitorReadsSimulateLimits(t *testing.T) {
 	if got := m.State().Caps.Simulate; got == nil || *got != pinned {
 		t.Fatalf("overridden limits %+v, want %+v", got, pinned)
 	}
+}
+
+// warnLog counts warnings about config.json.
+type warnLog struct {
+	logging.Nop
+	warns atomic.Int32
+}
+
+func (l *warnLog) Warn(msg string, _ ...any) {
+	if strings.Contains(msg, "config.json") {
+		l.warns.Add(1)
+	}
+}
+
+// The agent warns once when the running node's time travel or developer API
+// differs from its config.json, and again only when that changes.
+func TestMonitorWarnsConfigNotRunning(t *testing.T) {
+	log := &warnLog{}
+	m := NewMonitor(MonitorOptions{NodeID: "dt"}, nil, nil, clock.Real{}, log, metrics.New())
+	m.update(func(s *LocalState) {
+		s.ConfigOK = true
+		s.Config.EnableTimeTravel = true
+	})
+	running := &ports.NodeCapabilities{TimeTravel: true}
+	m.checkConfigRunning(running)
+	if n := log.warns.Load(); n != 0 {
+		t.Fatalf("%d warnings for a node that runs its file", n)
+	}
+	running.TimeTravel = false // the file turned it on; the node was not restarted
+	m.checkConfigRunning(running)
+	m.checkConfigRunning(running)
+	if n := log.warns.Load(); n != 1 {
+		t.Fatalf("%d warnings, want 1", n)
+	}
+	running.DeveloperAPI = true
+	m.checkConfigRunning(running)
+	if n := log.warns.Load(); n != 2 {
+		t.Fatalf("%d warnings after a new difference, want 2", n)
+	}
+}
+
+// editedConfig is a config.json that a test edits.
+type editedConfig struct {
+	fakealgod.ConfigReader
+	mu      sync.Mutex
+	edited  bool
+	modTime time.Time
+}
+
+func (c *editedConfig) Read() (ports.NodeConfig, error) {
+	cfg, err := c.ConfigReader.Read()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cfg.ModTime = c.modTime
+	cfg.EnableTimeTravel = cfg.EnableTimeTravel || c.edited
+	return cfg, err
+}
+
+// enableTimeTravel edits the file to turn time travel on.
+func (c *editedConfig) enableTimeTravel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.edited, c.modTime = true, c.modTime.Add(time.Second)
+}
+
+// An edit of config.json is compared with the running node as soon as the
+// agent sees it, not at the next verify interval.
+func TestMonitorWarnsConfigEditPromptly(t *testing.T) {
+	lim := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 320000, ResourceLimitMultiplier: 1}
+	n := fakealgod.New(fakealgod.Options{ID: "dt", StartRound: 50, Simulate: &lim})
+	t.Cleanup(n.Close)
+	cfg := &editedConfig{ConfigReader: fakealgod.ConfigReader{Node: n}, modTime: time.Unix(1000, 0)}
+	log := &warnLog{}
+	m := NewMonitor(MonitorOptions{NodeID: "dt", WaitTimeout: time.Minute, ConfigRecheck: 20 * time.Millisecond, VerifyInterval: time.Hour},
+		algodhttp.New(n.URL(), n.Token(), nil), cfg, clock.Real{}, log, metrics.New())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go m.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return m.State().Online && m.State().LimitsKnown })
+	if w := log.warns.Load(); w != 0 {
+		t.Fatalf("%d warnings for a node that runs its file", w)
+	}
+	cfg.enableTimeTravel()
+	waitFor(t, time.Second, func() bool { return log.warns.Load() == 1 })
 }

@@ -26,6 +26,16 @@ type Versions struct {
 	Build     string
 }
 
+// NodeCapabilities is what a dtalgorand node reports at GET
+// /v2/capabilities.
+type NodeCapabilities struct {
+	// TimeTravel and DeveloperAPI are the config the running node has, which
+	// differs from its config.json when that was edited after it started.
+	TimeTravel, DeveloperAPI bool
+	// Limits holds the simulate object, the time limit and the query object.
+	Limits domain.SimulateLimits
+}
+
 // AlgodClient talks to one algod REST endpoint.
 type AlgodClient interface {
 	Status(ctx context.Context) (Status, error)
@@ -34,9 +44,9 @@ type AlgodClient interface {
 	// HasBlock reports whether the node can serve the given round (cheap probe).
 	HasBlock(ctx context.Context, round uint64) (bool, error)
 	Versions(ctx context.Context) (Versions, error)
-	// SimulateLimits reads dtalgorand's GET /v2/transactions/simulate/limits:
-	// nil and no error for a node without the endpoint (stock algod).
-	SimulateLimits(ctx context.Context) (*domain.SimulateLimits, error)
+	// Capabilities reads dtalgorand's GET /v2/capabilities: nil and no
+	// error for a node without the endpoint (stock algod).
+	Capabilities(ctx context.Context) (*NodeCapabilities, error)
 	// BoxNames lists the box keys of an application.
 	BoxNames(ctx context.Context, appID uint64) ([][]byte, error)
 	// Box returns a box value; ErrNotFound when absent.
