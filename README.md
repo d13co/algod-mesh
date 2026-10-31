@@ -130,7 +130,7 @@ What changes for clients: the agent endpoints are `/mesh/*` instead of `/loadb/*
 On each host, in bash or sh (not fish), as a user with sudo:
 
 ```sh
-# 1. Note what runs now: the user (pass it to setup if it isn't the algod data dir's owner) and the agents.
+# 1. Note what runs now: the user (pass it to setup if it isn't algorand, or dtalgorand for a dtalgorand node) and the agents.
 grep -h '^User=' /etc/systemd/system/algod-loadb-mesh*.service
 units=$(find /etc/systemd/system -name 'algod-loadb-mesh*.service' ! -name 'algod-loadb-mesh@.service' -printf '%f\n' | sort -u)
 echo $units    # algod-loadb-mesh.service and/or algod-loadb-mesh@NAME.service
@@ -212,8 +212,8 @@ The bundle contains the sync key. Anyone who has it can read every node's algod 
 `algod-mesh-setup -h` and `algod-mesh-autoconfig -h` list every option. By default:
 
 - **node id**: the hostname, minus `.local` (`--id`)
-- **algod data dir**: running `algod` and `dtalgod` nodes, `$ALGORAND_DATA`, `$DTALGORAND_DATA` and the usual locations (`/var/lib/algorand`, `/var/lib/dtalgorand`, `/var/lib/dtalgorand_NETWORK`, ...); it asks when there are several, and labels the dtalgorand ones (`EnableTimeTravel` in `config.json`) (`--data-dir`)
-- **service user**: the user the agents on the host already run as, else the owner of the data dir (`dtalgorand` for a dtalgorand node), so the agent can read the node's tokens and `config.json`; else `algorand`, else root (`--user`)
+- **algod data dir**: running `algod` and `dtalgod` nodes, `$ALGORAND_DATA`, `$DTALGORAND_DATA` and the usual locations (`/var/lib/algorand`, `/var/lib/dtalgorand`, `/var/lib/dtalgorand_NETWORK`, ...); it asks when there are several, and labels the dtalgorand ones (`EnableTimeTravel` in `config.json`); with no terminal to ask on, it takes the only one a running node uses, else stops (`--data-dir`)
+- **service user**: the user the agents on the host already run as (their units' `User=`, else the owner of their configs); else the owner of the data dir when that is `algorand` or `dtalgorand`, so the agent can read the node's tokens and `config.json`; else `algorand`, else root. Any other owner (root, a container's uid, whoever started an `algod` on a dir of their own) is not trusted with the sync key. Setup says which user it picked and why (`--user`)
 - **client token**: the node's own `algod.token`, so clients keep their current token (`--client-token-file`)
 - **addresses**: every `10.112.*`/`10.114.*` interface, else a public one (`--address`). Clients and gossip are served on all of them and peers are told about all of them.
 - **ports**: 4000/tcp for clients and 4001/udp for gossip, or the next free pair if [other agents](#several-algods-on-one-host) run on the host (`--client-port`, `--mesh-port`)

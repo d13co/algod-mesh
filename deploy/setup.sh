@@ -16,7 +16,8 @@
 #   --no-start       install everything, but do not enable or start the service
 #   --user USER      user the service runs as (default: the user the agents on
 #                    this host already run as, else the owner of the algod
-#                    data dir, else algorand, else root)
+#                    data dir when that is algorand or dtalgorand, else
+#                    algorand, else root)
 #
 # Anything else is passed to autoconfig, which detects what it can and takes
 # the registry app id and sync key from the bundle printed by
@@ -100,6 +101,7 @@ main() {
 		[ -n "$u" ] || continue
 		if [ -z "$user" ]; then
 			user=$u
+			say "running the agent as $u, like the agents set up here ($f says User=$u; --user picks another)"
 		elif [ "$user" != "$u" ] && [ "$others" -gt 0 ]; then
 			die "--user $user: $f runs as $u, and the agents on this host share one user"
 		fi
@@ -187,7 +189,7 @@ main() {
 	# --- user and directories -----------------------------------------------
 
 	# check_clash left the config's data dir in I_DIR.
-	[ -n "$user" ] || user=$(default_user "$I_DIR")
+	[ -n "$user" ] || user=$(pick_user "$target" "$others" "$I_DIR")
 	local group
 	group=$(id -gn "$user")
 	# The agent reads the node's tokens and config.json.
@@ -255,18 +257,60 @@ main() {
 	fi
 }
 
-# default_user DIR prints the user to run the service as when nothing chose
-# one: the owner of DIR, the algod data dir (the agent reads its tokens and
-# config.json), else algorand, else root.
+# pick_user TARGET OTHERS DIR prints the user to run the service as when
+# neither --user nor a unit chose one, and says why. With other agents on the
+# host (OTHERS of them) or a config at TARGET already, it is the user they run
+# as, which owns their configs and CONFIG_DIR (setup hands them over); without
+# systemd there is no unit that says. Another user would take CONFIG_DIR and
+# the state dir from them. A root-owned config says nothing: root may have put
+# it there, and an agent running as root reads whatever another user owns.
+# Else default_user DIR.
+pick_user() {
+	local f u
+	if [ -e "$1" ] || [ "$2" -gt 0 ]; then
+		for f in "$1" "$CONFIG_DIR"/*.yaml "$CONFIG_DIR"; do
+			[ -e "$f" ] || continue
+			u=$(stat -c %U "$f" 2>/dev/null) || continue
+			case "$u" in "" | root | UNKNOWN) continue ;; esac
+			id -u "$u" >/dev/null 2>&1 || continue
+			say "running the agent as $u, like the agents set up here ($f belongs to $u; --user picks another)"
+			echo "$u"
+			return
+		done
+	fi
+	default_user "$3"
+}
+
+# default_user DIR prints the user to run the service as when nothing else
+# chose one, and says why: the owner of DIR, the algod data dir, when that is
+# algorand or dtalgorand (the agent reads the node's tokens and config.json),
+# else algorand, else root. Any other owner is no one to trust with the sync
+# key: root for a hand install, a container's uid that maps to some host
+# account, or a local user who started an algod on a dir of their own.
 default_user() {
-	local u=""
+	local u="" why
 	[ -z "$1" ] || u=$(stat -c %U "$1" 2>/dev/null) || u=""
-	# stat prints UNKNOWN for a uid with no name.
-	if [ -n "$u" ] && [ "$u" != UNKNOWN ] && id -u "$u" >/dev/null 2>&1; then
-		echo "$u"
-	elif id -u algorand >/dev/null 2>&1; then
+	case "$u" in
+	algorand | dtalgorand)
+		if id -u "$u" >/dev/null 2>&1; then
+			say "running the agent as $u, which owns $1 (--user picks another)"
+			echo "$u"
+			return
+		fi
+		;;
+	esac
+	if [ -z "$1" ]; then
+		why="no algod data dir"
+	elif [ -z "$u" ] || [ "$u" = UNKNOWN ]; then
+		why="no named owner for $1"
+	else
+		why="$1 belongs to $u, not algorand or dtalgorand"
+	fi
+	if id -u algorand >/dev/null 2>&1; then
+		say "running the agent as algorand ($why; --user picks another)"
 		echo algorand
 	else
+		say "running the agent as root ($why, and no algorand user; --user picks another)"
 		echo root
 	fi
 }

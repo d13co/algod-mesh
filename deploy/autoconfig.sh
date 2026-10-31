@@ -4,7 +4,8 @@
 #                        --instance NAME)
 #   local.data_dir       the algod data dir (running algod or dtalgod -d,
 #                        $ALGORAND_DATA, $DTALGORAND_DATA, common locations);
-#                        asks when there are several
+#                        asks when there are several, or with no terminal
+#                        takes the only one a running node uses
 #   addresses            every 10.112.* and 10.114.* interface, else a public
 #                        one. Clients and gossip are served on all of them and
 #                        peers are told all of them (the mesh binds what it
@@ -154,36 +155,48 @@ dir_note() {
 	printf '%s' "$note"
 }
 
+# detect_data_dirs prints the candidate data dirs, one per line, each after
+# "running " when a running node uses it and "- " otherwise.
 detect_data_dirs() {
-	local root=${AUTOCONFIG_ROOT:-} exe var pid args dir
+	local root=${AUTOCONFIG_ROOT:-} name exe var pid args dir
 	# Test hook: the candidates, one per line, instead of looking around.
 	if [ -n "${AUTOCONFIG_DATA_DIRS+set}" ]; then
-		printf '%s\n' "$AUTOCONFIG_DATA_DIRS"
+		printf '%s\n' "$AUTOCONFIG_DATA_DIRS" | sed 's/^/- /'
 		return
 	fi
 	# Test hook: AUTOCONFIG_ROOT stands in for / in /proc and the usual
 	# locations below.
 	# Running nodes: `algod -d DIR` or `dtalgod -d DIR`, else the variable
-	# each reads (dtalgod ignores $ALGORAND_DATA). Paths inside containers
-	# usually do not exist on the host and are skipped by the check below.
-	for exe in algod dtalgod; do
-		var=ALGORAND_DATA
-		[ "$exe" = algod ] || var=DTALGORAND_DATA
-		for pid in $(pgrep -x "$exe" 2>/dev/null || true); do
-			args=$(tr '\0' '\n' <"$root/proc/$pid/cmdline" 2>/dev/null) || continue
+	# each reads (dtalgod ignores $ALGORAND_DATA). A dtalgod that goal starts
+	# runs as algod, from /usr/lib/dtalgorand/bin/algod: its binary's path
+	# tells. Paths inside containers usually do not exist on the host and are
+	# skipped by the check below. A node may exit, or belong to another user,
+	# while this reads its /proc: it is left out, not the rest.
+	for name in algod dtalgod; do
+		for pid in $(pgrep -x "$name" 2>/dev/null || true); do
+			args=$(tr '\0' '\n' 2>/dev/null <"$root/proc/$pid/cmdline") || continue
 			dir=$(printf '%s\n' "$args" | awk 'prev == "-d" { print; exit } { prev = $0 }')
-			[ -n "$dir" ] || dir=$(tr '\0' '\n' <"$root/proc/$pid/environ" 2>/dev/null | sed -n "s/^$var=//p")
-			[ -n "$dir" ] && echo "$dir"
+			if [ -z "$dir" ]; then
+				var=ALGORAND_DATA
+				if [ "$name" = dtalgod ]; then
+					var=DTALGORAND_DATA
+				else
+					exe=$(readlink "$root/proc/$pid/exe" 2>/dev/null) || exe=""
+					case "$exe" in */dtalgorand/*) var=DTALGORAND_DATA ;; esac
+				fi
+				dir=$(tr '\0' '\n' 2>/dev/null <"$root/proc/$pid/environ" | sed -n "s/^$var=//p") || dir=""
+			fi
+			[ -z "$dir" ] || echo "running $dir"
 		done
 	done
-	[ -n "${ALGORAND_DATA:-}" ] && echo "$ALGORAND_DATA"
-	[ -n "${DTALGORAND_DATA:-}" ] && echo "$DTALGORAND_DATA"
+	[ -z "${ALGORAND_DATA:-}" ] || echo "- $ALGORAND_DATA"
+	[ -z "${DTALGORAND_DATA:-}" ] || echo "- $DTALGORAND_DATA"
 	# The algorand and dtalgorand packages' dirs, the /var/lib/PACKAGE_NETWORK
 	# dirs of their template units, and hand installs.
 	for dir in "$root"/var/lib/algorand "$root"/var/lib/algorand/*/ "$root"/var/lib/algorand_*/ \
 		"$root"/var/lib/dtalgorand "$root"/var/lib/dtalgorand/*/ "$root"/var/lib/dtalgorand_*/ \
 		"$root"/opt/algorand/node/data "$root$HOME/node/data" "$root"/algod/data; do
-		echo "${dir%/}"
+		echo "- ${dir%/}"
 	done
 }
 
@@ -193,13 +206,17 @@ if [ -z "$data_dir" ]; then
 	for dir in ${skip_dirs[@]+"${skip_dirs[@]}"}; do
 		skip+="$(realpath -m "$dir") "
 	done
-	candidates=()
-	while IFS= read -r dir; do
+	# The candidates, and those a running node uses (detect_data_dirs lists
+	# these first).
+	candidates=() running=()
+	while IFS= read -r line; do
+		dir=${line#* }
 		[ -n "$dir" ] && is_data_dir "$dir" || continue
 		dir=$(realpath "$dir")
 		case "$skip" in *" $dir "*) continue ;; esac
 		case " ${candidates[*]-} " in *" $dir "*) continue ;; esac
 		candidates+=("$dir")
+		[ "${line%% *}" != running ] || running+=("$dir")
 	done < <(detect_data_dirs)
 
 	case ${#candidates[@]} in
@@ -209,25 +226,32 @@ if [ -z "$data_dir" ]; then
 		;;
 	1) data_dir=${candidates[0]} ;;
 	*)
-		if ! { : </dev/tty; } 2>/dev/null; then
+		if { : </dev/tty; } 2>/dev/null; then
+			echo "Several algod data dirs found:" >/dev/tty
+			for i in "${!candidates[@]}"; do
+				printf '  %d) %s  (%s)\n' $((i + 1)) "${candidates[$i]}" "$(dir_note "${candidates[$i]}")" >/dev/tty
+			done
+			while :; do
+				printf 'Use which? [1-%d] ' ${#candidates[@]} >/dev/tty
+				read -r n </dev/tty || die "no choice made"
+				if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le ${#candidates[@]} ]; then
+					data_dir=${candidates[$((n - 1))]}
+					break
+				fi
+			done
+		elif [ ${#running[@]} = 1 ]; then
+			# No one to ask. A package's dir stays when its node does not
+			# run (a host with both packages has both): a lone running node
+			# is the one to serve.
+			data_dir=${running[0]}
+			warn "several algod data dirs; using $data_dir, the only one a running node uses (--data-dir picks another)"
+		else
 			list=""
 			for dir in "${candidates[@]}"; do
 				list+="${list:+, }$dir ($(dir_note "$dir"))"
 			done
 			die "several algod data dirs: $list; pass --data-dir"
 		fi
-		echo "Several algod data dirs found:" >/dev/tty
-		for i in "${!candidates[@]}"; do
-			printf '  %d) %s  (%s)\n' $((i + 1)) "${candidates[$i]}" "$(dir_note "${candidates[$i]}")" >/dev/tty
-		done
-		while :; do
-			printf 'Use which? [1-%d] ' ${#candidates[@]} >/dev/tty
-			read -r n </dev/tty || die "no choice made"
-			if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le ${#candidates[@]} ]; then
-				data_dir=${candidates[$((n - 1))]}
-				break
-			fi
-		done
 		;;
 	esac
 fi
