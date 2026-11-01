@@ -184,12 +184,15 @@ type FleetCapabilitiesReply struct {
 }
 
 // FleetSimulateLimits is the capabilities response's simulate object, in
-// dtalgorand's own form.
+// dtalgorand's own form. MaxRounds and ResourceLimitMultiplier are absent,
+// as a dtalgorand without simulate's read extensions leaves them out, when
+// the node reported is one; an older node sends max-rounds 0 for rounds
+// disabled, so absent and 0 are told apart.
 type FleetSimulateLimits struct {
-	MaxTxnGroups            uint64 `json:"max-txn-groups"`
-	MaxRounds               uint64 `json:"max-rounds"`
-	MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
-	ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
+	MaxTxnGroups            uint64  `json:"max-txn-groups"`
+	MaxRounds               *uint64 `json:"max-rounds,omitempty"`
+	MaxExtraOpcodeBudget    uint64  `json:"max-extra-opcode-budget"`
+	ResourceLimitMultiplier *uint64 `json:"resource-limit-multiplier,omitempty"`
 }
 
 // FleetQueryLimits is the capabilities response's query object, in
@@ -210,12 +213,21 @@ type FleetQueryLimits struct {
 // combined across nodes could promise a request no single node runs (many
 // groups from one, many rounds from another). The node is the one whose
 // limits are largest, compared in order: groups, rounds, extra opcode budget,
-// time travel, developer API, then its id for a stable answer. A node whose
-// limits are all at least another's always wins. The resource limit
-// multiplier is the smallest of every eligible node instead, stock ones
-// included: no request asks for it, so the router may send a request to any
-// of them, and that is what it is sure to get. ok is false when no
-// eligible upstream reports limits, a fleet of stock algods.
+// simulate's read extensions, time travel, developer API, then its id for a
+// stable answer. A node whose limits are all at least another's always wins.
+// The resource limit multiplier is the smallest of every eligible node
+// instead, stock ones and those without the read extensions (the consensus
+// limits) counting as 1: no request asks for it, so the router may send a
+// request to any of them, and that is what it is sure to get. ok is false
+// when no eligible upstream reports limits, a fleet of stock algods.
+//
+// When the node reported has no read extensions, max-rounds and the
+// multiplier are left out, as that node leaves them out. During a rollout
+// that happens when a newer node has more groups or budget than every older
+// one; an older node with rounds otherwise comes first on rounds, and one
+// with rounds disabled on the read extensions. A client then sees the fleet
+// as that node, without rounds, while the router still sends a request that
+// names them to an older node.
 //
 // Time travel and the developer API are the fleet's: true when any node not
 // excluded has them, since the router sends the requests that need them to
@@ -279,8 +291,10 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeo
 	}
 	l := best.Caps.SimulateLimits()
 	reply := FleetCapabilitiesReply{TimeTravel: timeTravel, DeveloperAPI: developerAPI, TimeLimitSeconds: timeLimit,
-		Simulate: FleetSimulateLimits{MaxTxnGroups: l.MaxTxnGroups, MaxRounds: l.MaxRounds,
-			MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget, ResourceLimitMultiplier: multiplier}}
+		Simulate: FleetSimulateLimits{MaxTxnGroups: l.MaxTxnGroups, MaxExtraOpcodeBudget: l.MaxExtraOpcodeBudget}}
+	if best.Caps.SimulateReads() {
+		reply.Simulate.MaxRounds, reply.Simulate.ResourceLimitMultiplier = &l.MaxRounds, &multiplier
+	}
 	if bestQuery != nil {
 		q := bestQuery.Caps.QueryLimits()
 		reply.Query = &FleetQueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
@@ -316,6 +330,8 @@ func simulateLimitsAbove(a, b Upstream) bool {
 		return la.MaxRounds > lb.MaxRounds
 	case la.MaxExtraOpcodeBudget != lb.MaxExtraOpcodeBudget:
 		return la.MaxExtraOpcodeBudget > lb.MaxExtraOpcodeBudget
+	case a.Caps.SimulateReads() != b.Caps.SimulateReads():
+		return a.Caps.SimulateReads()
 	case a.Caps.TimeTravel != b.Caps.TimeTravel:
 		return a.Caps.TimeTravel
 	case a.Caps.DeveloperAPI != b.Caps.DeveloperAPI:

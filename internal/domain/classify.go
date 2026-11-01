@@ -148,10 +148,14 @@ type SimulateNeeds struct {
 	Groups            int    // len(txn-groups)
 	Rounds            int    // len(rounds), duplicates included
 	ExtraOpcodeBudget uint64 // extra-opcode-budget
-	// Fork marks an option only dtalgorand has: parallel-groups, a validity
-	// window mode or a protocol. Groups and Rounds beyond stock algod's are
-	// told by the limits instead.
+	// Fork marks an option only dtalgorand from before POST /v2/query has:
+	// parallel-groups, a validity window mode or a protocol. Groups and Rounds
+	// beyond stock algod's are told by the limits instead.
 	Fork bool
+	// Dtalgorand is the relaxed form of Fork and Rounds: any dtalgorand node,
+	// so that one without them answers with its pointer to POST /v2/query
+	// rather than stock algod with an unknown field.
+	Dtalgorand bool
 	// DeveloperAPI marks an execution trace or protocol future, which algod
 	// simulates only with EnableDeveloperAPI.
 	DeveloperAPI bool
@@ -171,7 +175,7 @@ type SimulateNeeds struct {
 
 // Fits reports whether a node with capabilities c accepts the request.
 func (n SimulateNeeds) Fits(c Capabilities) bool {
-	if n.Fork && c.Simulate == nil {
+	if (n.Fork && !c.SimulateReads()) || (n.Dtalgorand && c.Simulate == nil) {
 		return false
 	}
 	if n.DeveloperAPI && !c.DeveloperAPI {
@@ -315,7 +319,9 @@ func (c *RequestClass) ApplyQuery(b QueryBody) {
 // drops the rounds, which the node reports one by one as it cannot simulate
 // them, then the rest of its needs, so that a node rejects the request with
 // its own message rather than the router with a 503. A single round is kept:
-// a node that lacks it would answer the latest state or an error.
+// a node that lacks it would answer the latest state or an error. One with
+// a rounds list or a fork option asks for any dtalgorand before any node,
+// for the refusal of a dtalgorand that no longer takes them.
 //
 // A query drops its rounds the same way, then its limits, so that a node
 // with queries says what it does not allow, and last its need for queries
@@ -330,6 +336,10 @@ func (c RequestClass) Relaxed() []RequestClass {
 	var out []RequestClass
 	if c.SimNeeds.RoundsSpan {
 		c.Round, c.RoundHigh, c.RoundWindow, c.HistoryAnyRound = nil, 0, WindowBlock, false
+		out = append(out, c)
+	}
+	if c.SimNeeds.Fork || c.SimNeeds.Rounds > 0 {
+		c.SimNeeds = &SimulateNeeds{Dtalgorand: true}
 		out = append(out, c)
 	}
 	c.SimNeeds = nil
@@ -415,6 +425,9 @@ func (c RequestClass) String() string {
 		}
 		if n.Fork {
 			parts = append(parts, "sim_fork")
+		}
+		if n.Dtalgorand {
+			parts = append(parts, "sim_dtalgorand")
 		}
 		if n.DeveloperAPI {
 			parts = append(parts, "sim_dev")

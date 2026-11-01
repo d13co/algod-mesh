@@ -65,6 +65,22 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	if lim, err := New(dq.URL(), dq.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != withQuery {
 		t.Fatalf("dtalgorand query limits: %v %+v", err, lim)
 	}
+	// An older node with rounds disabled sends max-rounds 0, and still takes
+	// the read extensions; a newer one leaves out max-rounds and the
+	// multiplier.
+	noRounds := domain.SimulateLimits{MaxTxnGroups: 16, MaxExtraOpcodeBudget: 640000, ResourceLimitMultiplier: 1}
+	d0 := fakealgod.New(fakealgod.Options{ID: "d0", StartRound: 5, Simulate: &noRounds})
+	defer d0.Close()
+	if lim, err := New(d0.URL(), d0.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != noRounds {
+		t.Fatalf("dtalgorand with rounds disabled: %v %+v", err, lim)
+	}
+	newer := domain.SimulateLimits{MaxTxnGroups: 16, MaxRounds: 4, MaxExtraOpcodeBudget: 640000, ResourceLimitMultiplier: 2, ReadsRemoved: true}
+	dn := fakealgod.New(fakealgod.Options{ID: "dn", StartRound: 5, Simulate: &newer})
+	defer dn.Close()
+	wantNewer := domain.SimulateLimits{MaxTxnGroups: 16, MaxExtraOpcodeBudget: 640000, ReadsRemoved: true}
+	if lim, err := New(dn.URL(), dn.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != wantNewer {
+		t.Fatalf("dtalgorand without the read extensions: %v %+v", err, lim)
+	}
 	bad := New(n.URL(), "wrong", nil)
 	if _, err := bad.Status(ctx); err == nil {
 		t.Fatal("wrong token must fail")

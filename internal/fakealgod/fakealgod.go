@@ -36,7 +36,10 @@ type Options struct {
 	// Simulate makes the node a dtalgorand that reports these limits at
 	// GET /v2/capabilities; nil is a stock algod (404).
 	// With Query.MaxCalls set it answers POST /v2/query too; without, that
-	// is a 404.
+	// is a 404. With ReadsRemoved it is a dtalgorand without simulate's read
+	// extensions: its capabilities have no max-rounds or
+	// resource-limit-multiplier, and a JSON simulate request that sets one
+	// of the removed fields gets its 400.
 	Simulate *domain.SimulateLimits
 }
 
@@ -363,6 +366,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		n.pool[id] = poolTxn{txn: raw}
 		n.mu.Unlock()
 		writeJSON(w, 200, map[string]string{"txId": id})
+	case p == "/v2/transactions/simulate" && r.Method == "POST" && n.refusingReads(w, r):
 	case p == "/v2/transactions/simulate" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/query" && (n.opts.Simulate == nil || n.opts.Simulate.Query.MaxCalls == 0):
 		writeJSON(w, 404, map[string]string{"message": "Not Found"})
@@ -373,10 +377,12 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
+		sim := map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-extra-opcode-budget": l.MaxExtraOpcodeBudget}
+		if !l.ReadsRemoved {
+			sim["max-rounds"], sim["resource-limit-multiplier"] = l.MaxRounds, l.ResourceLimitMultiplier
+		}
 		reply := map[string]any{"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI,
-			"time-limit-seconds": l.TimeLimitSeconds,
-			"simulate": map[string]any{"max-txn-groups": l.MaxTxnGroups, "max-rounds": l.MaxRounds,
-				"max-extra-opcode-budget": l.MaxExtraOpcodeBudget, "resource-limit-multiplier": l.ResourceLimitMultiplier}}
+			"time-limit-seconds": l.TimeLimitSeconds, "simulate": sim}
 		if q := l.Query; q.MaxCalls > 0 {
 			reply["query"] = map[string]any{"max-calls": q.MaxCalls, "max-call-budget": q.MaxCallBudget,
 				"max-call-log-bytes": q.MaxCallLogBytes, "max-call-state-bytes": q.MaxCallStateBytes, "max-response-bytes": q.MaxResponseBytes, "max-rounds": q.MaxRounds}
@@ -431,6 +437,55 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 200, map[string]any{"node": n.opts.ID, "path": p, "method": r.Method, "round": round})
 	}
+}
+
+// removedSimulateFields are the simulate request fields a dtalgorand
+// without the read extensions refuses, in the order it names them.
+var removedSimulateFields = []string{"rounds", "parallel-groups", "skip-validity-window", "rewrite-validity-window", "protocol"}
+
+// refusingReads answers a simulate request that sets a removed field with
+// the 400 such a node gives, when the node is one; false leaves it to the
+// rest. As on the node, null, false, 0, "" and empty values set nothing.
+func (n *Node) refusingReads(w http.ResponseWriter, r *http.Request) bool {
+	if n.opts.Simulate == nil || !n.opts.Simulate.ReadsRemoved {
+		return false
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return false
+	}
+	var set []string
+	for _, f := range removedSimulateFields {
+		switch v := body[f].(type) {
+		case nil:
+		case bool:
+			if v {
+				set = append(set, f)
+			}
+		case string:
+			if v != "" {
+				set = append(set, f)
+			}
+		case float64:
+			if v != 0 {
+				set = append(set, f)
+			}
+		case []any:
+			if len(v) > 0 {
+				set = append(set, f)
+			}
+		case map[string]any:
+			if len(v) > 0 {
+				set = append(set, f)
+			}
+		}
+	}
+	if len(set) == 0 {
+		return false
+	}
+	writeJSON(w, 400, map[string]string{"message": "simulate no longer takes " + strings.Join(set, ", ") +
+		": use POST /v2/query for read-only calls at several rounds, in isolation or under another protocol"})
+	return true
 }
 
 // simulating runs a simulate request or query as SetSimulate says; false leaves the
