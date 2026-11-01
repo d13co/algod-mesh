@@ -58,7 +58,7 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 		t.Fatalf("dtalgorand simulate limits: %v %+v", err, lim)
 	}
 	withQuery := want
-	withQuery.Query = domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+	withQuery.Query = domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16}
 	dq := fakealgod.New(fakealgod.Options{ID: "dq", StartRound: 5, Simulate: &withQuery})
 	defer dq.Close()
 	if lim, err := New(dq.URL(), dq.Token(), nil).SimulateLimits(ctx); err != nil || lim == nil || *lim != withQuery {

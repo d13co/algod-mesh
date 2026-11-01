@@ -156,11 +156,12 @@ func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, er
 		TimeLimitSeconds        uint64 `json:"time-limit-seconds"`
 		// Absent on a node without POST /v2/query.
 		Query *struct {
-			MaxCalls         uint64 `json:"max-calls"`
-			MaxCallBudget    uint64 `json:"max-call-budget"`
-			MaxCallLogBytes  uint64 `json:"max-call-log-bytes"`
-			MaxResponseBytes uint64 `json:"max-response-bytes"`
-			MaxRounds        uint64 `json:"max-rounds"`
+			MaxCalls          uint64 `json:"max-calls"`
+			MaxCallBudget     uint64 `json:"max-call-budget"`
+			MaxCallLogBytes   uint64 `json:"max-call-log-bytes"`
+			MaxCallStateBytes uint64 `json:"max-call-state-bytes"`
+			MaxResponseBytes  uint64 `json:"max-response-bytes"`
+			MaxRounds         uint64 `json:"max-rounds"`
 		} `json:"query"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -171,7 +172,7 @@ func (c *Client) SimulateLimits(ctx context.Context) (*domain.SimulateLimits, er
 		TimeLimitSeconds: raw.TimeLimitSeconds}
 	if q := raw.Query; q != nil {
 		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
 	}
 	return lim, nil
 }

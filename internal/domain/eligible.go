@@ -187,11 +187,12 @@ type FleetSimulateLimitsReply struct {
 // FleetQueryLimits is the limits response's query object, in dtalgorand's
 // own form.
 type FleetQueryLimits struct {
-	MaxCalls         uint64 `json:"max-calls"`
-	MaxCallBudget    uint64 `json:"max-call-budget"`
-	MaxCallLogBytes  uint64 `json:"max-call-log-bytes"`
-	MaxResponseBytes uint64 `json:"max-response-bytes"`
-	MaxRounds        uint64 `json:"max-rounds"`
+	MaxCalls          uint64 `json:"max-calls"`
+	MaxCallBudget     uint64 `json:"max-call-budget"`
+	MaxCallLogBytes   uint64 `json:"max-call-log-bytes"`
+	MaxCallStateBytes uint64 `json:"max-call-state-bytes"`
+	MaxResponseBytes  uint64 `json:"max-response-bytes"`
+	MaxRounds         uint64 `json:"max-rounds"`
 }
 
 // FleetSimulateLimits is what a simulate request sent to the mesh may ask
@@ -241,7 +242,7 @@ func FleetSimulateLimits(us []Upstream, bestRound, tolerance uint64) (FleetSimul
 	if bestQuery != nil {
 		q := bestQuery.Caps.QueryLimits()
 		reply.Query = &FleetQueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
 	}
 	return reply, true
 }
