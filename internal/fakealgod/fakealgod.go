@@ -384,8 +384,12 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		reply := map[string]any{"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI,
 			"time-limit-seconds": l.TimeLimitSeconds, "simulate": sim}
 		if q := l.Query; q.MaxCalls > 0 {
-			reply["query"] = map[string]any{"max-calls": q.MaxCalls, "max-call-budget": q.MaxCallBudget,
+			query := map[string]any{"max-calls": q.MaxCalls, "max-call-budget": q.MaxCallBudget,
 				"max-call-log-bytes": q.MaxCallLogBytes, "max-call-state-bytes": q.MaxCallStateBytes, "max-response-bytes": q.MaxResponseBytes, "max-rounds": q.MaxRounds}
+			if q.MaxTotalCalls > 0 { // unset: a node from before max-total-calls
+				query["max-total-calls"] = q.MaxTotalCalls
+			}
+			reply["query"] = query
 		}
 		writeJSON(w, 200, reply)
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":

@@ -545,7 +545,8 @@ func fmtLimits(l *domain.SimulateLimits, err error) string {
 		s = fmt.Sprintf("groups=%d budget=%d time_limit=%ds reads_removed", l.MaxTxnGroups, l.MaxExtraOpcodeBudget, l.TimeLimitSeconds)
 	}
 	if q := l.Query; q.MaxCalls > 0 {
-		s += fmt.Sprintf(" query_calls=%d query_rounds=%d query_budget=%d", q.MaxCalls, q.MaxRounds, q.MaxCallBudget)
+		s += fmt.Sprintf(" query_calls=%d query_rounds=%d query_total_calls=%d query_budget=%d", q.MaxCalls, q.MaxRounds,
+			domain.Capabilities{Simulate: l}.QueryLimits().MaxTotalCalls, q.MaxCallBudget)
 	}
 	return s
 }

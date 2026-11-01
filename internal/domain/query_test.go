@@ -5,7 +5,8 @@ import (
 	"testing"
 )
 
-var dtQuery = QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+var dtQuery = QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16,
+	MaxTotalCalls: 1024}
 
 // queryCaps is a dtalgorand node with queries.
 func queryCaps() Capabilities {
@@ -70,6 +71,9 @@ func TestQueryNeedsFits(t *testing.T) {
 	dtDev := dt
 	dtDev.DeveloperAPI = true
 	noQuery := Capabilities{Simulate: &dtLimits}
+	olderLimits := *dt.Simulate
+	olderLimits.Query.MaxTotalCalls = 0 // a node from before max-total-calls
+	older := Capabilities{Simulate: &olderLimits}
 	for _, tc := range []struct {
 		name string
 		n    QueryNeeds
@@ -78,7 +82,10 @@ func TestQueryNeedsFits(t *testing.T) {
 	}{
 		{"stock", QueryNeeds{Calls: 1}, Capabilities{}, false},
 		{"dtalgorand without queries", QueryNeeds{Calls: 1}, noQuery, false},
-		{"within limits", QueryNeeds{Calls: 1024, Rounds: 16, Budget: 320000}, dt, true},
+		{"within limits", QueryNeeds{Calls: 64, Rounds: 16, Budget: 320000}, dt, true},
+		{"all calls at the latest round", QueryNeeds{Calls: 1024}, dt, true},
+		{"too many total calls", QueryNeeds{Calls: 65, Rounds: 16}, dt, false},
+		{"older node: calls × rounds", QueryNeeds{Calls: 1024, Rounds: 16}, older, true},
 		{"too many calls", QueryNeeds{Calls: 1025}, dt, false},
 		{"too many rounds", QueryNeeds{Rounds: 17}, dt, false},
 		{"budget too large", QueryNeeds{Budget: 320001}, dt, false},
@@ -98,8 +105,20 @@ func TestQueryLimitsClamped(t *testing.T) {
 		t.Fatalf("clamped %+v", got)
 	}
 	c = Capabilities{Simulate: &SimulateLimits{Query: QueryLimits{MaxCalls: 5}}}
-	if got := c.QueryLimits(); got.MaxRounds != 1 || got.MaxCallBudget != 1 {
+	if got := c.QueryLimits(); got.MaxRounds != 1 || got.MaxCallBudget != 1 || got.MaxTotalCalls != 5 {
 		t.Fatalf("zeros %+v", got)
+	}
+	c = Capabilities{Simulate: &SimulateLimits{Query: QueryLimits{MaxCalls: 5, MaxRounds: 4}}}
+	if got := c.QueryLimits(); got.MaxTotalCalls != 20 {
+		t.Fatalf("total calls unset: %+v", got)
+	}
+	c.Simulate.Query.MaxTotalCalls = 100
+	if got := c.QueryLimits(); got.MaxTotalCalls != 20 {
+		t.Fatalf("total calls above calls × rounds: %+v", got)
+	}
+	c.Simulate.Query.MaxTotalCalls = 7
+	if got := c.QueryLimits(); got.MaxTotalCalls != 7 {
+		t.Fatalf("total calls %+v", got)
 	}
 	if !c.Queries() || (Capabilities{Simulate: &SimulateLimits{Query: QueryLimits{MaxRounds: 4}}}).Queries() {
 		t.Fatal("queries are told by max calls")
@@ -182,13 +201,22 @@ func TestFleetQueryLimits(t *testing.T) {
 		Upstream{ID: "small", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &small}},
 		Upstream{ID: "dt", Health: HealthSynced, LastRound: 100, Caps: queryCaps()})
 	got, _ = FleetCapabilities(us, 100, 2, 0)
-	want := FleetQueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+	want := FleetQueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16,
+		MaxTotalCalls: 1024}
 	if got.Query == nil || *got.Query != want {
 		t.Fatalf("query limits %+v, want %+v (one node's, the most calls)", got.Query, want)
 	}
 	us[3].Health = HealthOffline
-	if got, _ = FleetCapabilities(us, 100, 2, 0); got.Query == nil || got.Query.MaxCalls != 64 {
-		t.Fatalf("with dt down: %+v", got.Query)
+	if got, _ = FleetCapabilities(us, 100, 2, 0); got.Query == nil || got.Query.MaxCalls != 64 || got.Query.MaxTotalCalls != 64*256 {
+		t.Fatalf("with dt down, small's total calls are calls × rounds: %+v", got.Query)
+	}
+	// With calls and rounds equal, the larger total calls wins.
+	more := *queryCaps().Simulate
+	more.Query.MaxTotalCalls = 0 // calls × rounds
+	us[2].Caps = Capabilities{Simulate: &more}
+	us[3].Health = HealthSynced
+	if got, _ = FleetCapabilities(us, 100, 2, 0); got.Query == nil || got.Query.MaxTotalCalls != 1024*16 {
+		t.Fatalf("total calls tie-break: %+v", got.Query)
 	}
 }
 

@@ -35,7 +35,7 @@ local:
   #   time_travel: true                 # EnableTimeTravel node: serves ?round= and /versions at any past round
   #   holders_index: true               # TimeTravelHoldersIndex node: serves /v2/assets/{id}/holders; implies time_travel
   #   simulate: { max_txn_groups: 16, max_rounds: 16, max_extra_opcode_budget: 320000, resource_limit_multiplier: 1, time_limit_seconds: 59,  # dtalgorand simulate limits; read from the node's GET /v2/capabilities unless set
-  #               query: { max_calls: 1024, max_call_budget: 320000, max_call_log_bytes: 65536, max_call_state_bytes: 67108864, max_response_bytes: 67108864, max_rounds: 16 } }  # POST /v2/query limits; unset: no queries
+  #               query: { max_calls: 1024, max_call_budget: 320000, max_call_log_bytes: 65536, max_call_state_bytes: 67108864, max_response_bytes: 16777216, max_rounds: 16, max_total_calls: 1024 } }  # POST /v2/query limits; unset: no queries
   #             # add reads_removed: true to simulate for a dtalgorand that moved rounds, parallel-groups, the validity window modes and protocol to POST /v2/query; unset: an older one that takes them
 
 registry:
