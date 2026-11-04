@@ -117,8 +117,12 @@ func TestQueryLimitsClamped(t *testing.T) {
 		t.Fatalf("total calls above calls × rounds: %+v", got)
 	}
 	c.Simulate.Query.MaxTotalCalls = 7
-	if got := c.QueryLimits(); got.MaxTotalCalls != 7 {
+	if got := c.QueryLimits(); got.MaxTotalCalls != 7 || got.MaxCalls != 5 {
 		t.Fatalf("total calls %+v", got)
+	}
+	c.Simulate.Query.MaxTotalCalls = 3
+	if got := c.QueryLimits(); got.MaxCalls != 3 || got.MaxTotalCalls != 3 {
+		t.Fatalf("calls above total calls: %+v", got)
 	}
 	if !c.Queries() || (Capabilities{Simulate: &SimulateLimits{Query: QueryLimits{MaxRounds: 4}}}).Queries() {
 		t.Fatal("queries are told by max calls")

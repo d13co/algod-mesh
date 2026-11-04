@@ -229,8 +229,9 @@ func (c Capabilities) QueryLimits() QueryLimits {
 
 // clamped reads the limits as dtalgorand reads its config
 // (simulation.QueryLimitsFromConfig): a call budget of at least one and at
-// most the fork's ceiling, between one and maxQueryRounds rounds, and a total
-// of calls × rounds no more than both allow together.
+// most the fork's ceiling, between one and maxQueryRounds rounds, a total of
+// calls × rounds no more than both allow together, and no more calls than that
+// total, since more are over it even at one round.
 func (l QueryLimits) clamped() QueryLimits {
 	if l.MaxCalls == 0 {
 		return QueryLimits{}
@@ -240,6 +241,7 @@ func (l QueryLimits) clamped() QueryLimits {
 	if all := l.MaxCalls * l.MaxRounds; l.MaxTotalCalls == 0 || l.MaxTotalCalls > all {
 		l.MaxTotalCalls = all
 	}
+	l.MaxCalls = min(l.MaxCalls, l.MaxTotalCalls)
 	return l
 }
 
