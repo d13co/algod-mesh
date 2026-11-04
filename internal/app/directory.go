@@ -1053,9 +1053,13 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 
 	if !d.opts.NoLocal {
 		lh := d.localJudge.Judge(now, local.Online, local.LastRound, best)
+		// The local caps come from config.json, kept while the node is down;
+		// with neither the file nor the node read yet, they are unknown. An
+		// absent node (no co-located one) is known to have none.
 		out = append(out, domain.Upstream{ID: d.opts.LocalID, Kind: domain.KindLocal, Tier: d.opts.LocalTier,
 			BaseURL: local.Endpoint, Token: local.Config.Token, Health: lh, LastRound: local.LastRound,
-			Caps: local.Caps, Draining: d.draining, Stats: d.stats.Snapshot(d.opts.LocalID), Source: "local"})
+			Caps: local.Caps, Draining: d.draining, Stats: d.stats.Snapshot(d.opts.LocalID), Source: "local",
+			CapsUnknown: !local.ConfigOK && !local.Online && !d.monitor.opts.Absent})
 	}
 
 	ids := make([]string, 0, len(d.peers))
@@ -1089,6 +1093,23 @@ func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 		default:
 			u.Source = "none"
 			p.judge.Judge(now, false, 0, best)
+		}
+		// What the peer is known to have while it is out, for answers about
+		// the fleet's features: a node that is down still has them, and one
+		// never heard from may.
+		switch {
+		case p.hasHB:
+			if u.Source == "none" {
+				last := p.hb.Caps
+				u.LastCaps = &last
+			}
+		case p.rec.Declared != nil:
+			if u.Source == "none" {
+				last := p.rec.Declared.Apply(domain.Capabilities{}, 0)
+				u.LastCaps = &last
+			}
+		default:
+			u.CapsUnknown = true
 		}
 		out = append(out, u)
 	}

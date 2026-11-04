@@ -102,12 +102,12 @@ func TestQueryNotRelaxedWhileQueryNodeIsOut(t *testing.T) {
 	}
 }
 
-// The fleet's limits carry the query object of a node with queries.
+// The fleet's capabilities carry the query object of a node with queries.
 func TestQueryLimitsForFleet(t *testing.T) {
 	f := newSimFleet(t, domain.Capabilities{Simulate: &testQueryLimits, TimeTravel: true})
-	rec := f.do(http.MethodGet, "/v2/transactions/simulate/limits", nil)
+	rec := f.do(http.MethodGet, "/v2/capabilities", nil)
 	if rec.Code != 200 {
-		t.Fatalf("limits: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("capabilities: %d %s", rec.Code, rec.Body.String())
 	}
 	var got struct {
 		Query *domain.FleetQueryLimits `json:"query"`
