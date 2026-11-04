@@ -168,6 +168,8 @@ func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, err
 			MaxCallStateBytes uint64 `json:"max-call-state-bytes"`
 			MaxResponseBytes  uint64 `json:"max-response-bytes"`
 			MaxRounds         uint64 `json:"max-rounds"`
+			// Absent on a node from before it: 0, read as calls × rounds.
+			MaxTotalCalls uint64 `json:"max-total-calls"`
 		} `json:"query"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -187,7 +189,7 @@ func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, err
 	}
 	if q := raw.Query; q != nil {
 		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls}
 	}
 	return &ports.NodeCapabilities{TimeTravel: raw.TimeTravel, DeveloperAPI: raw.DeveloperAPI, Limits: lim}, nil
 }

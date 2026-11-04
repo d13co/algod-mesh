@@ -158,6 +158,10 @@ type QueryLimits struct {
 	MaxCallStateBytes uint64 `json:"max_call_state_bytes,omitempty" yaml:"max_call_state_bytes,omitempty"`
 	MaxResponseBytes  uint64 `json:"max_response_bytes,omitempty" yaml:"max_response_bytes,omitempty"` // 0: no limit
 	MaxRounds         uint64 `json:"max_rounds" yaml:"max_rounds"`
+	// MaxTotalCalls bounds calls × rounds in one query (rounds at least 1,
+	// duplicates counted). 0 is max_calls × max_rounds: a node from before
+	// the field, or an override that does not set it.
+	MaxTotalCalls uint64 `json:"max_total_calls,omitempty" yaml:"max_total_calls,omitempty"`
 }
 
 // StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod
@@ -225,13 +229,19 @@ func (c Capabilities) QueryLimits() QueryLimits {
 
 // clamped reads the limits as dtalgorand reads its config
 // (simulation.QueryLimitsFromConfig): a call budget of at least one and at
-// most the fork's ceiling, and between one and maxQueryRounds rounds.
+// most the fork's ceiling, between one and maxQueryRounds rounds, a total of
+// calls × rounds no more than both allow together, and no more calls than that
+// total, since more are over it even at one round.
 func (l QueryLimits) clamped() QueryLimits {
 	if l.MaxCalls == 0 {
 		return QueryLimits{}
 	}
 	l.MaxCallBudget = min(max(l.MaxCallBudget, 1), maxExtraOpcodeBudget)
 	l.MaxRounds = min(max(l.MaxRounds, 1), maxQueryRounds)
+	if all := l.MaxCalls * l.MaxRounds; l.MaxTotalCalls == 0 || l.MaxTotalCalls > all {
+		l.MaxTotalCalls = all
+	}
+	l.MaxCalls = min(l.MaxCalls, l.MaxTotalCalls)
 	return l
 }
 

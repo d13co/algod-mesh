@@ -115,7 +115,8 @@ func TestQueryLimitsForFleet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := domain.FleetQueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRounds: 4}
+	want := domain.FleetQueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRounds: 4,
+		MaxTotalCalls: 256}
 	if got.Query == nil || *got.Query != want {
 		t.Fatalf("query limits %+v, want %+v", got.Query, want)
 	}

@@ -59,7 +59,8 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 		t.Fatalf("dtalgorand capabilities: %v %+v", err, lim)
 	}
 	withQuery := want
-	withQuery.Query = domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16}
+	withQuery.Query = domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16,
+		MaxTotalCalls: 1024}
 	dq := fakealgod.New(fakealgod.Options{ID: "dq", StartRound: 5, Simulate: &withQuery})
 	defer dq.Close()
 	if lim, err := New(dq.URL(), dq.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != withQuery {
@@ -80,6 +81,13 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	wantNewer := domain.SimulateLimits{MaxTxnGroups: 16, MaxExtraOpcodeBudget: 640000, ReadsRemoved: true}
 	if lim, err := New(dn.URL(), dn.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != wantNewer {
 		t.Fatalf("dtalgorand without the read extensions: %v %+v", err, lim)
+	}
+	older := withQuery // a node from before max-total-calls leaves it out
+	older.Query.MaxTotalCalls = 0
+	do := fakealgod.New(fakealgod.Options{ID: "do", StartRound: 5, Simulate: &older})
+	defer do.Close()
+	if lim, err := New(do.URL(), do.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != older {
+		t.Fatalf("query limits without max-total-calls: %v %+v", err, lim)
 	}
 	bad := New(n.URL(), "wrong", nil)
 	if _, err := bad.Status(ctx); err == nil {

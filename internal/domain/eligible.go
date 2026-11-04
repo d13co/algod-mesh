@@ -204,6 +204,7 @@ type FleetQueryLimits struct {
 	MaxCallStateBytes uint64 `json:"max-call-state-bytes"`
 	MaxResponseBytes  uint64 `json:"max-response-bytes"`
 	MaxRounds         uint64 `json:"max-rounds"`
+	MaxTotalCalls     uint64 `json:"max-total-calls"`
 }
 
 // FleetCapabilities is GET /v2/capabilities answered for the fleet. Its
@@ -298,7 +299,7 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeo
 	if bestQuery != nil {
 		q := bestQuery.Caps.QueryLimits()
 		reply.Query = &FleetQueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls}
 	}
 	return reply, true
 }
@@ -311,6 +312,8 @@ func queryLimitsAbove(a, b Upstream) bool {
 		return la.MaxCalls > lb.MaxCalls
 	case la.MaxRounds != lb.MaxRounds:
 		return la.MaxRounds > lb.MaxRounds
+	case la.MaxTotalCalls != lb.MaxTotalCalls:
+		return la.MaxTotalCalls > lb.MaxTotalCalls
 	case la.MaxCallBudget != lb.MaxCallBudget:
 		return la.MaxCallBudget > lb.MaxCallBudget
 	case a.Caps.TimeTravel != b.Caps.TimeTravel:

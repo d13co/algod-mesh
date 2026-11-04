@@ -274,7 +274,14 @@ func (n QueryNeeds) Fits(c Capabilities) bool {
 		return false
 	}
 	l := c.QueryLimits()
-	return uint64(n.Calls) <= l.MaxCalls && uint64(n.Rounds) <= l.MaxRounds && n.Budget <= l.MaxCallBudget
+	return uint64(n.Calls) <= l.MaxCalls && uint64(n.Rounds) <= l.MaxRounds && n.Budget <= l.MaxCallBudget &&
+		n.TotalCalls() <= l.MaxTotalCalls
+}
+
+// TotalCalls is the number of call runs the query asks for: its calls at
+// each listed round, or at the latest round alone without rounds.
+func (n QueryNeeds) TotalCalls() uint64 {
+	return uint64(n.Calls) * uint64(max(n.Rounds, 1))
 }
 
 // QueryBody is the part of a query body routing reads, with dtalgorand's
