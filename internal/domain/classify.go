@@ -580,9 +580,17 @@ func Classify(method, path, rawQuery string) RequestClass {
 		c.Versions = true
 		// Only GET has a route: any other method gets algod's 405 from
 		// every node, so Ahead stays unset.
-		if hi, ok := versionsHigh(q); ok && method == "GET" {
-			c.RoundHigh = hi
-			c.Ahead = Reply{400, "given round is greater than the latest round"}
+		if method == "GET" {
+			if hi, ok := versionsHigh(q); ok {
+				c.RoundHigh = hi
+				c.Ahead = Reply{400, "given round is greater than the latest round"}
+			} else if n, ok := versionsDescNext(q); ok {
+				// A node behind next answers 200 from its latest round
+				// down, skipping the versions in between: there is no
+				// algod answer to give, so Ahead stays unset and a page
+				// past every node gets a 503 to retry.
+				c.RoundHigh = n
+			}
 		}
 		return c
 	}
@@ -737,6 +745,25 @@ func versionsHigh(q url.Values) (uint64, bool) {
 		hi = max(hi, r)
 	}
 	return hi, hi > 0
+}
+
+// versionsDescNext returns the round a descending versions page continued
+// with next starts from, when it names no max-round or rounds: the node
+// reads from the lesser of next and its latest round down, so only a node
+// that has reached next serves the page in full. An ascending page ends at
+// the node's latest round instead, and needs an in-sync node as a first
+// page does. ok is false when next or order is missing, malformed or
+// repeated, and for next 0, which every node has.
+func versionsDescNext(q url.Values) (uint64, bool) {
+	if q["max-round"] != nil || q["rounds"] != nil {
+		return 0, false
+	}
+	order, next := q["order"], q["next"]
+	if len(order) != 1 || order[0] != "desc" || len(next) != 1 {
+		return 0, false
+	}
+	n, ok := parseRound(next[0])
+	return n, ok && n > 0
 }
 
 // queryValues parses a raw query string. url.ParseQuery returns every valid
