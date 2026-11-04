@@ -41,6 +41,8 @@ func TestVersionsRouteByLastRound(t *testing.T) {
 	for q, want := range map[string]string{
 		"": "b", "?max-round=90": "b", "?rounds=5,90": "b",
 		"?max-round=95": "c", "?min-round=10&max-round=100": "c", "?rounds=5,95,20": "c",
+		"?order=desc&next=90": "b", "?order=desc&next=95": "c", "?order=desc&next=95&max-round=90": "b",
+		"?order=asc&next=95": "b",
 	} {
 		rec := f.do(http.MethodGet, versionsPath+q, nil)
 		if up := rec.Header().Get("X-Algod-Mesh-Upstream"); rec.Code != 200 || up != want {
@@ -58,6 +60,19 @@ func TestVersionsPastEveryNodeAnswersAsAlgod(t *testing.T) {
 		if rec.Code != 400 || !strings.Contains(rec.Body.String(), "given round is greater than the latest round") {
 			t.Fatalf("versions%s: %d %s", q, rec.Code, rec.Body.String())
 		}
+	}
+	if n := f.b.Hits(versionsPath) + f.c.Hits(versionsPath); n != 0 {
+		t.Fatalf("the nodes saw %d pages past their round", n)
+	}
+}
+
+// A descending page continued past every node gets a 503 to retry: a node
+// behind next would answer 200 without the versions in between.
+func TestVersionsDescNextPastEveryNodeIsRetried(t *testing.T) {
+	f := versionsFleet(t)
+	rec := f.do(http.MethodGet, versionsPath+"?order=desc&next=101", nil)
+	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "no eligible upstream") {
+		t.Fatalf("versions continued past every node: %d %s", rec.Code, rec.Body.String())
 	}
 	if n := f.b.Hits(versionsPath) + f.c.Hits(versionsPath); n != 0 {
 		t.Fatalf("the nodes saw %d pages past their round", n)

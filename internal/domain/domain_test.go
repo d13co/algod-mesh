@@ -79,6 +79,28 @@ func TestClassify(t *testing.T) {
 			RoundHigh: 500, Ahead: versionsAhead}},
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=30%2C500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
 			RoundHigh: 500, Ahead: versionsAhead}},
+		// A descending page continued with next reads from next down: a node
+		// behind it would skip the versions in between with a 200, so there
+		// is no algod answer past every node.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=450", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 450}},
+		{method: "GET", path: "/v2/assets/42/versions", query: "order=desc&next=450&min-round=10&limit=5", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 450}},
+		// max-round or rounds already bound the page, and every node has round 0.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=450&max-round=500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=30&rounds=30,500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true,
+			RoundHigh: 500, Ahead: versionsAhead}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=0", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		// An ascending page ends at the node's latest round, as a first page
+		// does; a malformed or repeated next or order every node rejects.
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "next=450", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=asc&next=450", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=abc", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=4&next=5", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&order=desc&next=450", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=450&max-round=abc", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
+		{method: "POST", path: "/v2/accounts/ADDR/versions", query: "order=desc&next=450", want: RequestClass{TimeTravel: true, Versions: true}},
 		// min-round alone ends at the node's latest; round 0 every node has.
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "min-round=500", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},
 		{method: "GET", path: "/v2/accounts/ADDR/versions", query: "rounds=0", want: RequestClass{TimeTravel: true, Versions: true, Idempotent: true}},

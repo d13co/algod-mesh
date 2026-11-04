@@ -319,6 +319,8 @@ An app's boxes history page (`/v2/applications/{id}/boxes/versions`) whose range
 
 A `.../versions` history page that ends at a round, `max-round` or the latest of `rounds`, goes only to a time-travel node that has reached that round, even one lagging behind the fleet, so a client following a page from a fresher node does not land on one that answers 400. When no time-travel node has reached it, the router answers as dtalgorand does: 400 `given round is greater than the latest round`, even for a page with other errors that a node would report first (an unknown `include` or a `limit` that isn't a number, say).
 
+A descending page continued with `next`, and naming neither `max-round` nor `rounds`, reads from `next` down, so it too goes only to a time-travel node that has reached `next`, lagging or not. A node behind it would answer 200 from its own latest round down, without the versions in between. dtalgorand has no error for such a page, so when no time-travel node has reached `next` the client gets a 503 to retry. An ascending page (the default order) ends at the node's latest round, as a first page does, so it goes only to a node in sync.
+
 ### dtalgorand simulate
 
 dtalgorand (the time-travel fork) extends `POST /v2/transactions/simulate` beyond what stock algod accepts: several transaction groups (`MaxAPISimulateGroups`) and a larger `extra-opcode-budget` (`MaxAPISimulateExtraOpcodeBudget`), and, until it moved them to `POST /v2/query`, one request at several rounds (`rounds`, `MaxAPISimulateRounds`) and the options `parallel-groups`, `skip-validity-window`, `rewrite-validity-window` and `protocol`. A stock node rejects such a request, so the router reads the body (JSON or msgpack) and sends it to a node that accepts it:
