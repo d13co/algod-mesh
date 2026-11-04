@@ -1,12 +1,17 @@
 package domain
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
 var dtLimits = SimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 4}
+
+// newLimits is a dtalgorand without simulate's read extensions.
+var newLimits = SimulateLimits{MaxTxnGroups: 16, MaxExtraOpcodeBudget: 1_000_000, ReadsRemoved: true}
 
 func simClass(b SimulateBody) RequestClass {
 	c := Classify("POST", "/v2/transactions/simulate", "")
@@ -80,6 +85,7 @@ func TestSimulateNeedsFits(t *testing.T) {
 	stock := Capabilities{}
 	dt := Capabilities{Simulate: &dtLimits}
 	dtDev := Capabilities{Simulate: &dtLimits, DeveloperAPI: true}
+	noReads := Capabilities{Simulate: &newLimits}
 	cases := []struct {
 		name  string
 		n     SimulateNeeds
@@ -99,6 +105,12 @@ func TestSimulateNeedsFits(t *testing.T) {
 		{"budget above dtalgorand", SimulateNeeds{ExtraOpcodeBudget: 1_000_001}, dt, false},
 		{"fork option on stock", SimulateNeeds{Fork: true}, stock, false},
 		{"fork option on dtalgorand", SimulateNeeds{Fork: true}, dt, true},
+		{"fork option on dtalgorand with rounds disabled", SimulateNeeds{Fork: true}, Capabilities{Simulate: &SimulateLimits{MaxTxnGroups: 16}}, true},
+		{"fork option without the read extensions", SimulateNeeds{Fork: true}, noReads, false},
+		{"rounds without the read extensions", SimulateNeeds{Rounds: 1}, noReads, false},
+		{"groups without the read extensions", SimulateNeeds{Groups: 16, ExtraOpcodeBudget: 1_000_000}, noReads, true},
+		{"relaxed fork option on stock", SimulateNeeds{Dtalgorand: true}, stock, false},
+		{"relaxed fork option without the read extensions", SimulateNeeds{Dtalgorand: true}, noReads, true},
 		{"trace without dev", SimulateNeeds{DeveloperAPI: true}, dt, false},
 		{"trace with dev", SimulateNeeds{DeveloperAPI: true}, dtDev, true},
 		// A hand-written override of zeros allows what stock algod does.
@@ -141,14 +153,122 @@ func TestRelaxed(t *testing.T) {
 		t.Fatalf("single round keeps its round: %+v", r)
 	}
 	r = simClass(SimulateBody{Rounds: []uint64{12, 40}, TxnGroups: make([]struct{}, 2)}).Relaxed()
-	if len(r) != 2 {
+	if len(r) != 3 {
 		t.Fatalf("rounds relaxations: %+v", r)
 	}
 	if r[0].Round != nil || r[0].RoundHigh != 0 || r[0].HistoryAnyRound || r[0].SimNeeds == nil || r[0].SimNeeds.Groups != 2 {
 		t.Fatalf("first relaxation drops the rounds only: %+v %+v", r[0], r[0].SimNeeds)
 	}
-	if r[1].Round != nil || r[1].SimNeeds != nil {
-		t.Fatalf("second relaxation drops every need: %+v", r[1])
+	// Then any dtalgorand, so that one without the rounds list says so.
+	if r[1].Round != nil || r[1].SimNeeds == nil || *r[1].SimNeeds != (SimulateNeeds{Dtalgorand: true}) {
+		t.Fatalf("second relaxation asks for any dtalgorand: %+v %+v", r[1], r[1].SimNeeds)
+	}
+	if r[2].Round != nil || r[2].SimNeeds != nil {
+		t.Fatalf("third relaxation drops every need: %+v", r[2])
+	}
+	r = simClass(SimulateBody{Round: 7, ParallelGroups: true}).Relaxed()
+	if len(r) != 2 || *r[0].SimNeeds != (SimulateNeeds{Dtalgorand: true}) || r[1].SimNeeds != nil || *r[0].Round != 7 || *r[1].Round != 7 {
+		t.Fatalf("fork option relaxations: %+v", r)
+	}
+}
+
+// Fork options and rounds go only to a dtalgorand that still takes them; a
+// node without them, or a config that predates the flag, is told apart.
+func TestEligibleSimulateReads(t *testing.T) {
+	old := Upstream{ID: "old", Health: HealthSynced, LastRound: 100, Caps: Capabilities{TimeTravel: true, Simulate: &dtLimits}}
+	oldNoRounds := Upstream{ID: "old0", Health: HealthSynced, LastRound: 100, Caps: Capabilities{TimeTravel: true, Simulate: &SimulateLimits{MaxTxnGroups: 16}}}
+	nw := Upstream{ID: "new", Health: HealthSynced, LastRound: 100, Caps: Capabilities{TimeTravel: true, Simulate: &newLimits}}
+	for _, b := range []SimulateBody{{ParallelGroups: true}, {SkipValidityWindow: true}, {RewriteValidityWindow: true}, {Protocol: "v43"}, {Rounds: []uint64{90, 95}}, {Rounds: []uint64{0}}} {
+		c := simClass(b)
+		if Eligible(nw, c, 100, 2) {
+			t.Errorf("%+v: eligible on a node without the read extensions", b)
+		}
+		if !Eligible(old, c, 100, 2) {
+			t.Errorf("%+v: not eligible on an older dtalgorand", b)
+		}
+		if CouldServe([]Upstream{nw}, c) || !CouldServe([]Upstream{nw, old}, c) {
+			t.Errorf("%+v: CouldServe counts the wrong nodes", b)
+		}
+		// Rounds still need max-rounds; the options only an older node.
+		if wantOld0 := len(b.Rounds) == 0; Eligible(oldNoRounds, c, 100, 2) != wantOld0 {
+			t.Errorf("%+v: on an older node with rounds disabled, eligible %v", b, !wantOld0)
+		}
+	}
+	// What both take goes to either.
+	plain := simClass(SimulateBody{TxnGroups: make([]struct{}, 8), Round: 50})
+	if !Eligible(nw, plain, 100, 2) || !Eligible(old, plain, 100, 2) {
+		t.Fatal("groups at a past round refused")
+	}
+}
+
+// Limits from an older agent's heartbeat, or an existing config, have no
+// reads_removed and still mean a node with the read extensions, rounds
+// disabled or not. A newer agent marks a node without them, and an older
+// router reading that heartbeat ignores the field.
+func TestSimulateReadsHeartbeatCompatibility(t *testing.T) {
+	var c Capabilities
+	if err := json.Unmarshal([]byte(`{"simulate":{"max_txn_groups":16,"max_rounds":0,"max_extra_opcode_budget":320000,"resource_limit_multiplier":1}}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.SimulateReads() || !(SimulateNeeds{Fork: true}).Fits(c) {
+		t.Fatalf("an older agent's limits lost the read extensions: %+v", c.Simulate)
+	}
+	b, err := json.Marshal(Capabilities{Simulate: &dtLimits})
+	if err != nil || strings.Contains(string(b), "reads_removed") {
+		t.Fatalf("limits with the read extensions carry the flag: %s %v", b, err)
+	}
+	b, _ = json.Marshal(Capabilities{Simulate: &newLimits})
+	var back Capabilities
+	if err := json.Unmarshal(b, &back); err != nil || back.SimulateReads() || !strings.Contains(string(b), `"reads_removed":true`) {
+		t.Fatalf("the flag did not round-trip: %s %+v", b, back.Simulate)
+	}
+	// An override that sets it promises no rounds and the consensus resource
+	// limits, whatever else it says.
+	o := Capabilities{Simulate: &SimulateLimits{MaxTxnGroups: 4, MaxRounds: 8, ResourceLimitMultiplier: 4, ReadsRemoved: true}}
+	if l := o.SimulateLimits(); l.MaxRounds != 0 || l.ResourceLimitMultiplier != 1 || l.MaxTxnGroups != 4 {
+		t.Fatalf("override without the read extensions: %+v", l)
+	}
+}
+
+// The fleet answer is one node's: without the read extensions it leaves out
+// max-rounds and the multiplier, as that node does; an older node's
+// max-rounds 0 (rounds disabled) is still sent.
+func TestFleetCapabilitiesReadsRemoved(t *testing.T) {
+	up := func(id string, l SimulateLimits) Upstream {
+		return Upstream{ID: id, Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &l}}
+	}
+	raw := func(r FleetCapabilitiesReply) map[string]any {
+		b, _ := json.Marshal(r.Simulate)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		return m
+	}
+	// A newer node with more groups is reported: no max-rounds, no multiplier.
+	got, ok := FleetCapabilities([]Upstream{up("new", newLimits), up("old", SimulateLimits{MaxTxnGroups: 4, MaxRounds: 8, ResourceLimitMultiplier: 4})}, 100, 2, 0)
+	m := raw(got)
+	if _, has := m["max-rounds"]; !ok || has || got.Simulate.MaxTxnGroups != 16 {
+		t.Fatalf("newer node reported with max-rounds: %+v", m)
+	}
+	if _, has := m["resource-limit-multiplier"]; has {
+		t.Fatalf("newer node reported with a multiplier: %+v", m)
+	}
+	// An older node with rounds comes first on rounds; the newer one counts
+	// as 1 for the multiplier.
+	got, _ = FleetCapabilities([]Upstream{up("new", newLimits), up("old", dtLimits)}, 100, 2, 0)
+	if got.Simulate.MaxRounds == nil || *got.Simulate.MaxRounds != 8 || got.Simulate.ResourceLimitMultiplier == nil || *got.Simulate.ResourceLimitMultiplier != 1 {
+		t.Fatalf("older node with rounds: %+v", raw(got))
+	}
+	// An older node with rounds disabled, otherwise equal, comes first on the
+	// read extensions, and its 0 is sent.
+	oldNoRounds := newLimits
+	oldNoRounds.ReadsRemoved, oldNoRounds.ResourceLimitMultiplier = false, 2
+	got, _ = FleetCapabilities([]Upstream{up("a-new", newLimits), up("z-old", oldNoRounds)}, 100, 2, 0)
+	if m = raw(got); m["max-rounds"] != float64(0) || m["resource-limit-multiplier"] != float64(1) {
+		t.Fatalf("older node with rounds disabled: %+v", m)
+	}
+	got, _ = FleetCapabilities([]Upstream{up("z-old", oldNoRounds)}, 100, 2, 0)
+	if m = raw(got); m["max-rounds"] != float64(0) || m["resource-limit-multiplier"] != float64(2) {
+		t.Fatalf("lone older node with rounds disabled: %+v", m)
 	}
 }
 
@@ -167,8 +287,8 @@ func TestFleetCapabilities(t *testing.T) {
 	// last had, though not for the limits.
 	got, ok := FleetCapabilities(us, 100, 2, 0)
 	want := FleetCapabilitiesReply{TimeTravel: true, DeveloperAPI: true,
-		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1}}
-	if !ok || got != want {
+		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: u64(8), MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: u64(1)}}
+	if !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("fleet limits %+v %v, want %+v", got, ok, want)
 	}
 	// A node at least as large everywhere wins whatever the order.
@@ -176,8 +296,8 @@ func TestFleetCapabilities(t *testing.T) {
 	more := append([]Upstream{{ID: "big", Health: HealthSynced, LastRound: 100, Caps: Capabilities{Simulate: &big, TimeTravel: true, DeveloperAPI: true}}}, us[1:]...)
 	got, _ = FleetCapabilities(more, 100, 2, 0)
 	want = FleetCapabilitiesReply{TimeTravel: true, DeveloperAPI: true,
-		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 16, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 4}}
-	if got != want {
+		Simulate: FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: u64(16), MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: u64(4)}}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("dominant node: %+v, want %+v", got, want)
 	}
 	// Time travel and the developer API are the fleet's, not only the

@@ -421,4 +421,21 @@ registry:
 	if s == nil || s.MaxTxnGroups != 16 || s.Query != (domain.QueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxRounds: 16}) {
 		t.Fatalf("overrides: %+v", s)
 	}
+	// Limits without reads_removed are an older dtalgorand, as they were
+	// before the flag; with it, a newer one.
+	if s.ReadsRemoved {
+		t.Fatal("an override without reads_removed lost the read extensions")
+	}
+	c, err = load(t, `local:
+  id: k44
+  data_dir: /tmp/x
+  overrides:
+    simulate: {max_txn_groups: 16, reads_removed: true}
+registry:
+  type: memory
+  auto_register: false
+`)
+	if err != nil || c.Local.Overrides.Simulate == nil || !c.Local.Overrides.Simulate.ReadsRemoved {
+		t.Fatalf("reads_removed override: %v %+v", err, c.Local.Overrides)
+	}
 }

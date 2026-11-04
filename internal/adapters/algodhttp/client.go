@@ -153,10 +153,12 @@ func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, err
 		DeveloperAPI     bool   `json:"developer-api"`
 		TimeLimitSeconds uint64 `json:"time-limit-seconds"`
 		Simulate         *struct {
-			MaxTxnGroups            uint64 `json:"max-txn-groups"`
-			MaxRounds               uint64 `json:"max-rounds"`
-			MaxExtraOpcodeBudget    uint64 `json:"max-extra-opcode-budget"`
-			ResourceLimitMultiplier uint64 `json:"resource-limit-multiplier"`
+			MaxTxnGroups uint64 `json:"max-txn-groups"`
+			// Absent on a dtalgorand without simulate's read extensions;
+			// every older one sends max-rounds, 0 when rounds is disabled.
+			MaxRounds               *uint64 `json:"max-rounds"`
+			MaxExtraOpcodeBudget    uint64  `json:"max-extra-opcode-budget"`
+			ResourceLimitMultiplier *uint64 `json:"resource-limit-multiplier"`
 		} `json:"simulate"`
 		// Absent on a node without POST /v2/query.
 		Query *struct {
@@ -175,9 +177,14 @@ func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, err
 		return nil, fmt.Errorf("%s: no simulate object: %s", path, truncate(body))
 	}
 	s := raw.Simulate
-	lim := domain.SimulateLimits{MaxTxnGroups: s.MaxTxnGroups, MaxRounds: s.MaxRounds,
-		MaxExtraOpcodeBudget: s.MaxExtraOpcodeBudget, ResourceLimitMultiplier: s.ResourceLimitMultiplier,
-		TimeLimitSeconds: raw.TimeLimitSeconds}
+	lim := domain.SimulateLimits{MaxTxnGroups: s.MaxTxnGroups, MaxExtraOpcodeBudget: s.MaxExtraOpcodeBudget,
+		ReadsRemoved: s.MaxRounds == nil, TimeLimitSeconds: raw.TimeLimitSeconds}
+	if s.MaxRounds != nil {
+		lim.MaxRounds = *s.MaxRounds
+	}
+	if s.ResourceLimitMultiplier != nil {
+		lim.ResourceLimitMultiplier = *s.ResourceLimitMultiplier // a missing one is 1, as 0 is
+	}
 	if q := raw.Query; q != nil {
 		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
 			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -42,8 +43,14 @@ func newSimFleetWith(t *testing.T, cCaps domain.Capabilities, o RouterOptions) *
 
 func newSimFleetDir(t *testing.T, cCaps domain.Capabilities, o RouterOptions, do DirectoryOptions) *simFleet {
 	t.Helper()
+	return newSimPair(t, domain.Capabilities{}, cCaps, o, do)
+}
+
+// newSimPair is newSimFleetDir with b's capabilities given too.
+func newSimPair(t *testing.T, bCaps, cCaps domain.Capabilities, o RouterOptions, do DirectoryOptions) *simFleet {
+	t.Helper()
 	h := newHarnessWith(t, do, algodhttp.Factory{})
-	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 100})
+	b := fakealgod.New(fakealgod.Options{ID: "b", StartRound: 100, Simulate: bCaps.Simulate, TimeTravel: bCaps.TimeTravel})
 	t.Cleanup(b.Close)
 	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 100, Simulate: cCaps.Simulate, TimeTravel: cCaps.TimeTravel})
 	t.Cleanup(c.Close)
@@ -55,8 +62,8 @@ func newSimFleetDir(t *testing.T, cCaps domain.Capabilities, o RouterOptions, do
 	h.d.SetRecords([]domain.NodeRecord{recB, recC})
 	r := NewRouter(o,
 		h.d, h.d.monitor, proxy.New(nil), nil, h.d.stats, h.fc, logging.Nop{}, h.m, nil, nil)
-	cCaps.MaxAcctLookback = 4
-	h.inject(addrA, signedHeartbeat(t, h.peerKey, "b", 1, 100, domain.Capabilities{MaxAcctLookback: 4}))
+	bCaps.MaxAcctLookback, cCaps.MaxAcctLookback = 4, 4
+	h.inject(addrA, signedHeartbeat(t, h.peerKey, "b", 1, 100, bCaps))
 	h.inject(addrB, signedHeartbeat(t, cKey, "c", 1, 100, cCaps))
 	waitFor(t, 2*time.Second, func() bool {
 		cands, _ := h.d.Snapshot()
@@ -174,9 +181,10 @@ func TestCapabilitiesForFleet(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
+	rounds, multiplier := uint64(8), uint64(1)
 	want := domain.FleetCapabilitiesReply{TimeTravel: true, TimeLimitSeconds: 30,
-		Simulate: domain.FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: 8, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: 1}}
-	if got != want {
+		Simulate: domain.FleetSimulateLimits{MaxTxnGroups: 16, MaxRounds: &rounds, MaxExtraOpcodeBudget: 1_000_000, ResourceLimitMultiplier: &multiplier}}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("capabilities %+v, want %+v", got, want)
 	}
 	// dtalgorand's own form: the simulate limits nested, no query object
@@ -190,6 +198,100 @@ func TestCapabilitiesForFleet(t *testing.T) {
 	}
 	if n := f.b.Hits("/v2/capabilities") + f.c.Hits("/v2/capabilities"); n != 0 {
 		t.Fatalf("capabilities forwarded %d times", n)
+	}
+}
+
+// fleetSimulate is the simulate object of the router's capabilities answer.
+func (f *simFleet) fleetSimulate(t *testing.T) map[string]any {
+	t.Helper()
+	rec := f.do(http.MethodGet, "/v2/capabilities", nil)
+	var got struct {
+		Simulate map[string]any `json:"simulate"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != 200 || got.Simulate == nil {
+		t.Fatalf("capabilities: %d %s", rec.Code, rec.Body.String())
+	}
+	return got.Simulate
+}
+
+// newTestLimits is a dtalgorand without simulate's read extensions, with
+// testLimits' groups and budget.
+var newTestLimits = domain.SimulateLimits{MaxTxnGroups: 16, MaxExtraOpcodeBudget: 1_000_000, TimeLimitSeconds: 30, ReadsRemoved: true}
+
+// readBodies are simulate requests only a dtalgorand from before POST
+// /v2/query runs, with the field its successor names in its refusal.
+var readBodies = []struct{ body, field string }{
+	{`{"txn-groups":[{"txns":[]}],"parallel-groups":true}`, "parallel-groups"},
+	{`{"txn-groups":[{"txns":[]}],"skip-validity-window":true}`, "skip-validity-window"},
+	{`{"txn-groups":[{"txns":[]}],"rewrite-validity-window":true}`, "rewrite-validity-window"},
+	{`{"txn-groups":[{"txns":[]}],"protocol":"latest"}`, "protocol"},
+	{`{"txn-groups":[{"txns":[]}],"rounds":[0,0]}`, "rounds"},
+	{`{"txn-groups":[{"txns":[]}],"rounds":[97,99]}`, "rounds"},
+}
+
+// During a rollout, requests that name the read extensions go to the older
+// node that still takes them, the rest to either, and the fleet answer is
+// the older node's while it has rounds.
+func TestSimulateReadsRoutedToOlderNode(t *testing.T) {
+	f := newSimPair(t, domain.Capabilities{Simulate: &testLimits}, domain.Capabilities{Simulate: &newTestLimits},
+		RouterOptions{Mode: domain.ModeFallback, RetryBudget: 1}, DirectoryOptions{})
+	for _, rb := range readBodies {
+		if up := f.simulate(t, rb.body); up != "b" {
+			t.Errorf("%s went to %q, want the older node", rb.body, up)
+		}
+	}
+	if n := f.c.Hits("/v2/transactions/simulate"); n != 0 {
+		t.Fatalf("the newer node saw %d requests with read extensions", n)
+	}
+	// Both run many groups and a large budget.
+	if up := f.simulate(t, `{"txn-groups":[{"txns":[]},{"txns":[]}],"extra-opcode-budget":500000}`); up == "" {
+		t.Fatal("no upstream for what both nodes run")
+	}
+	if got := f.fleetSimulate(t); got["max-rounds"] != float64(8) || got["resource-limit-multiplier"] != float64(1) {
+		t.Fatalf("capabilities of a mixed fleet: %+v", got)
+	}
+}
+
+// With no node that takes the read extensions, the request still reaches a
+// dtalgorand, not the stock node, and the client gets its 400 pointing to
+// POST /v2/query. The fleet answer leaves out max-rounds and the
+// multiplier, as that node does.
+func TestSimulateReadsRefusedByNewerNode(t *testing.T) {
+	f := newSimFleet(t, domain.Capabilities{Simulate: &newTestLimits, TimeTravel: true})
+	for _, rb := range readBodies {
+		rec := f.do(http.MethodPost, "/v2/transactions/simulate", strings.NewReader(rb.body))
+		want := "simulate no longer takes " + rb.field + ": use POST /v2/query"
+		if up := rec.Header().Get("X-Algod-Mesh-Upstream"); rec.Code != 400 || up != "c" || !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("%s: %d from %q: %s, want the newer node's 400", rb.body, rec.Code, up, rec.Body.String())
+		}
+	}
+	if n := f.b.Hits("/v2/transactions/simulate"); n != 0 {
+		t.Fatalf("the stock node saw %d requests with read extensions", n)
+	}
+	// What it still takes runs: several groups at a past round.
+	if up := f.simulate(t, `{"txn-groups":[{"txns":[]},{"txns":[]}],"round":50}`); up != "c" {
+		t.Fatalf("groups at a past round went to %q", up)
+	}
+	got := f.fleetSimulate(t)
+	if got["max-txn-groups"] != float64(16) {
+		t.Fatalf("capabilities: %+v", got)
+	}
+	for _, k := range []string{"max-rounds", "resource-limit-multiplier"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("capabilities carry %s for a node without it: %+v", k, got)
+		}
+	}
+}
+
+// An older dtalgorand with rounds disabled is reported with max-rounds 0,
+// not without it: it still takes the other read extensions.
+func TestCapabilitiesRoundsDisabled(t *testing.T) {
+	f := newSimFleet(t, domain.Capabilities{Simulate: &domain.SimulateLimits{MaxTxnGroups: 16, ResourceLimitMultiplier: 4}})
+	if got := f.fleetSimulate(t); got["max-rounds"] != float64(0) || got["resource-limit-multiplier"] != float64(1) {
+		t.Fatalf("capabilities: %+v", got)
+	}
+	if up := f.simulate(t, `{"txn-groups":[{"txns":[]}],"parallel-groups":true}`); up != "c" {
+		t.Fatalf("parallel-groups went to %q", up)
 	}
 }
 

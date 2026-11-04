@@ -130,6 +130,13 @@ type SimulateLimits struct {
 	MaxRounds               uint64 `json:"max_rounds" yaml:"max_rounds"` // 0: rounds is disabled
 	MaxExtraOpcodeBudget    uint64 `json:"max_extra_opcode_budget" yaml:"max_extra_opcode_budget"`
 	ResourceLimitMultiplier uint64 `json:"resource_limit_multiplier" yaml:"resource_limit_multiplier"`
+	// ReadsRemoved is a dtalgorand that no longer takes simulate's read
+	// extensions (rounds, parallel-groups, the validity window modes,
+	// protocol), which moved to POST /v2/query, and runs unnamed resources at
+	// the consensus limits. Its capabilities answer has no max-rounds key.
+	// It is set only when that is known, so that limits without it, from an
+	// older agent or an existing config, keep meaning a node that takes them.
+	ReadsRemoved bool `json:"reads_removed,omitempty" yaml:"reads_removed,omitempty"`
 	// TimeLimitSeconds caps one request's run time (504, or per-round errors
 	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
 	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
@@ -189,9 +196,20 @@ func (c Capabilities) SimulateLimits() SimulateLimits {
 	}
 	l.MaxExtraOpcodeBudget = min(l.MaxExtraOpcodeBudget, maxExtraOpcodeBudget)
 	l.ResourceLimitMultiplier = min(max(l.ResourceLimitMultiplier, 1), maxResourceLimitMultiplier)
+	if l.ReadsRemoved {
+		// Such a node has no rounds and the consensus resource limits,
+		// whatever an override says.
+		l.MaxRounds, l.ResourceLimitMultiplier = 0, 1
+	}
 	l.Query = l.Query.clamped()
 	return l
 }
+
+// SimulateReads reports whether the node takes simulate's read extensions:
+// parallel-groups, the validity window modes and protocol (rounds also
+// needs MaxRounds). Only a dtalgorand from before POST /v2/query replaced
+// them does.
+func (c Capabilities) SimulateReads() bool { return c.Simulate != nil && !c.Simulate.ReadsRemoved }
 
 // Queries reports whether the node answers POST /v2/query.
 func (c Capabilities) Queries() bool { return c.Simulate != nil && c.Simulate.Query.MaxCalls > 0 }
