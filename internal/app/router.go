@@ -610,9 +610,11 @@ func boxesRoundGone(class domain.RequestClass, out ports.Outcome) bool {
 const roundGone = "given round is no longer available"
 
 // historyUntrustedFor is how long a node that said its history is untrusted
-// is held to a stock node's windows. Only a new store, ttsnap verify
-// -clear-diverged or a restart clears it, so this only bounds how soon the
-// node is tried again; the agent's probe reports it sooner.
+// is held to a stock node's windows. A store marked diverged stays so until
+// it is replaced or ttsnap verify -clear-diverged clears the mark; any other
+// cause holds until the ledger loads again (a restart or a catchup). So this
+// only bounds how soon the node is tried again; the agent's probe reports it
+// sooner.
 const historyUntrustedFor = 5 * time.Minute
 
 // honorsRound reports whether an answer to a request at round want shows the
@@ -861,7 +863,7 @@ const historyUntrustedMessage = "algod-mesh: the time travel history is not serv
 // holdersMissingMessage answers a holders page when every node with the
 // option has said its index is missing or stale. It keeps the node's own
 // words ("the asset holders index is not complete"), which clients match.
-const holdersMissingMessage = "algod-mesh: the asset holders index is not complete on any node that enables it: stop the node and build it with ttimport -holders-index"
+const holdersMissingMessage = "algod-mesh: the asset holders index is not complete on any node that enables it: stop the node and build it with ttimport -holders-index, as the node's user"
 
 // holdersMissingTriedMessage is holdersMissingMessage when some nodes with
 // the option were not tried.

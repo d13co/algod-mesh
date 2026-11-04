@@ -507,8 +507,9 @@ func (c RequestClass) StatKey() string {
 // roundMarkedRoute reports a path whose dtalgorand handler marks every
 // answer at a round with TTRoundHeader: the reads that look the round up in
 // the history. Other paths under these groups take no round (pending
-// transactions by address, say) or are box listings, which stock algod
-// answers at recent rounds without the mark.
+// transactions by address, say) or are box listings, which dtalgorand marks
+// too but stock algod answers at recent rounds without the mark, so a missing
+// mark there says nothing.
 func roundMarkedRoute(segs []string) bool {
 	n := len(segs)
 	switch segs[1] {
