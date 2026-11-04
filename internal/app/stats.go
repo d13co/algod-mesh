@@ -42,6 +42,7 @@ type upstreamStats struct {
 	busyUntil      [domain.SlotCount]time.Time
 	holdersUntil   time.Time // holders index missing or stale until then
 	untrustedUntil time.Time // time-travel history untrusted until then
+	unhonoredUntil time.Time // answered without the round asked for; passed over until then
 }
 
 // NewStatsBook creates an empty book.
@@ -146,6 +147,18 @@ func (b *StatsBook) HistoryUntrusted(id string, d time.Duration) {
 	}
 }
 
+// RoundUnhonored marks an upstream that answered a request at a round
+// without marking the answer with that round, for d. It is not a failure:
+// its answers without a round are unaffected.
+func (b *StatsBook) RoundUnhonored(id string, d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.get(id)
+	if until := b.clock.Now().Add(d); until.After(s.unhonoredUntil) {
+		s.unhonoredUntil = until
+	}
+}
+
 // Snapshot returns the current stats for an upstream.
 func (b *StatsBook) Snapshot(id string) domain.Stats {
 	b.mu.Lock()
@@ -171,7 +184,8 @@ func (b *StatsBook) Snapshot(id string) domain.Stats {
 	}
 	st := domain.Stats{LatencyMS: lat, Inflight: s.inflight,
 		BreakerOpen: now.Before(s.openUntil), Throttled: now.Before(s.throttledUntil),
-		HoldersMissing: now.Before(s.holdersUntil), HistoryUntrusted: now.Before(s.untrustedUntil)}
+		HoldersMissing: now.Before(s.holdersUntil), HistoryUntrusted: now.Before(s.untrustedUntil),
+		RoundUnhonored: now.Before(s.unhonoredUntil)}
 	for slot, until := range s.busyUntil {
 		if now.Before(until) {
 			st.BusySlots = st.BusySlots.With(domain.Slot(slot))

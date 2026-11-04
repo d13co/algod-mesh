@@ -110,7 +110,9 @@ type SimulateCaps struct {
 
 // Check returns why a simulate request asking for n is beyond the caps, or ""
 // when it is within them. A request that names one round with "round" asks
-// for no rounds list, so MaxRounds does not apply to it.
+// for no rounds list, so MaxRounds does not apply to it. Only an older
+// dtalgorand takes a rounds list; a newer one refuses it, so against a fleet
+// of newer nodes MaxRounds bounds nothing.
 func (c SimulateCaps) Check(n SimulateNeeds) string {
 	switch {
 	case c.MaxGroups > 0 && n.Groups > c.MaxGroups:

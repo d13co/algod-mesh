@@ -148,7 +148,7 @@ routing:
 #       per_day: 50000                # credits per 24 hours, refilled steadily; 0: no limit
 #       simulate:                     # what one simulate request may ask for (403 beyond); 0: no cap
 #         max_groups: 1
-#         max_rounds: 1
+#         max_rounds: 1               # older dtalgorand only: newer nodes refuse simulate rounds
 #         max_extra_opcode_budget: 320000
 #         unnamed_resources: true     # allow-unnamed-resources; default true
 #         exec_trace: false           # exec-trace-config; default true
