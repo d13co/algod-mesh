@@ -174,3 +174,56 @@ func TestForwardWithheldMessageGzip(t *testing.T) {
 		t.Fatalf("message of an unknown encoding: %q", m)
 	}
 }
+
+// Check sees a small error answer's message: a refused answer is withheld
+// with its message, an accepted one reaches the client whole.
+func TestForwardCheck(t *testing.T) {
+	const body = `{"message":"given round is no longer available"}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		w.Write([]byte(body))
+	}))
+	defer up.Close()
+	f := New(nil)
+	var seen string
+	check := func(accept bool) func(int, http.Header, string) bool {
+		return func(_ int, _ http.Header, msg string) bool { seen = msg; return accept }
+	}
+	rec := httptest.NewRecorder()
+	out := f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, Check: check(false)})
+	if out.Status != 400 || !out.Failed() || out.HeadersSent || out.Message != "given round is no longer available" || rec.Body.Len() != 0 {
+		t.Fatalf("refused: %+v body %q", out, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	out = f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, Check: check(true)})
+	if out.Failed() || !out.HeadersSent || rec.Code != 400 || rec.Body.String() != body || seen != "given round is no longer available" {
+		t.Fatalf("accepted: %+v %d %q seen %q", out, rec.Code, rec.Body.String(), seen)
+	}
+}
+
+// Check reads a gzip answer's message through the compression, and an
+// accepted one reaches the client still compressed, byte for byte.
+func TestForwardCheckGzip(t *testing.T) {
+	const msg = "given round is no longer available"
+	var z bytes.Buffer
+	zw := gzip.NewWriter(&z)
+	zw.Write([]byte(`{"message":"` + msg + `"}`))
+	zw.Close()
+	body := z.Bytes()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(400)
+		w.Write(body)
+	}))
+	defer up.Close()
+	var seen string
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	out := New(nil).Forward(rec, req, ports.Target{BaseURL: up.URL,
+		Check: func(_ int, _ http.Header, m string) bool { seen = m; return true }})
+	if out.Failed() || seen != msg || rec.Code != 400 || !bytes.Equal(rec.Body.Bytes(), body) || rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("outcome %+v seen %q, client got %d %q", out, seen, rec.Code, rec.Body.Bytes())
+	}
+}
