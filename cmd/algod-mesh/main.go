@@ -246,11 +246,15 @@ func checkNodeCmd(args []string) error {
 	report["configured_oldest_round"] = domain.OldestRoundFor(arch, st.LastRound)
 	if v, err := client.Versions(ctx); err == nil {
 		report["algod_version"] = v.Build
+		report["algod_commit"] = v.Commit
 	}
-	if nc, err := client.Capabilities(ctx); err == nil && nc != nil {
-		report["simulate_limits"] = nc.Limits
-		report["running_time_travel"] = nc.TimeTravel
-		report["running_developer_api"] = nc.DeveloperAPI
+	if nc, err := client.Capabilities(ctx); err == nil {
+		report["dtalgorand"] = nc != nil // a stock algod has no /v2/capabilities
+		if nc != nil {
+			report["simulate_limits"] = nc.Limits
+			report["running_time_travel"] = nc.TimeTravel
+			report["running_developer_api"] = nc.DeveloperAPI
+		}
 	}
 	if *probe {
 		oldest, err := app.ProbeOldestRound(ctx, client, st.LastRound)

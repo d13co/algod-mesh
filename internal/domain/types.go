@@ -76,11 +76,18 @@ type Capabilities struct {
 	// reports it at GET /v2/capabilities. nil is a stock
 	// algod (or an agent too old to ask): one transaction group, no rounds
 	// list, the upstream opcode budget limit and none of the fork's options.
-	Simulate        *SimulateLimits `json:"simulate,omitempty"`
-	AlgodVersion    string          `json:"algod_version,omitempty"`
-	GenesisID       string          `json:"genesis_id,omitempty"`
-	StorageEngine   string          `json:"storage_engine,omitempty"`
-	MaxAcctLookback uint64          `json:"max_acct_lookback,omitempty"`
+	Simulate     *SimulateLimits `json:"simulate,omitempty"`
+	AlgodVersion string          `json:"algod_version,omitempty"`
+	// AlgodCommit is the commit the node's binary was built from, as
+	// /versions reports it. A dtalgorand reports the upstream version in
+	// AlgodVersion, so this is what tells its builds apart.
+	AlgodCommit string `json:"algod_commit,omitempty"`
+	// Dtalgorand is a node that answers GET /v2/capabilities, which a stock
+	// algod does not. The agent sets it; an external is never marked.
+	Dtalgorand      bool   `json:"dtalgorand,omitempty"`
+	GenesisID       string `json:"genesis_id,omitempty"`
+	StorageEngine   string `json:"storage_engine,omitempty"`
+	MaxAcctLookback uint64 `json:"max_acct_lookback,omitempty"`
 }
 
 // CapabilityOverrides are manual corrections from config or the registry.

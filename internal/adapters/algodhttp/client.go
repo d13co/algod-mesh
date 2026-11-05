@@ -153,13 +153,15 @@ func (c *Client) Versions(ctx context.Context) (ports.Versions, error) {
 			Minor       int    `json:"minor"`
 			BuildNumber int    `json:"build_number"`
 			Channel     string `json:"channel"`
+			CommitHash  string `json:"commit_hash"`
 		} `json:"build"`
 	}
 	if _, err := c.getJSON(ctx, "/versions", &raw); err != nil {
 		return ports.Versions{}, err
 	}
 	return ports.Versions{GenesisID: raw.GenesisID,
-		Build: fmt.Sprintf("%d.%d.%d-%s", raw.Build.Major, raw.Build.Minor, raw.Build.BuildNumber, raw.Build.Channel)}, nil
+		Build:  fmt.Sprintf("%d.%d.%d-%s", raw.Build.Major, raw.Build.Minor, raw.Build.BuildNumber, raw.Build.Channel),
+		Commit: raw.Build.CommitHash}, nil
 }
 
 // Capabilities implements ports.AlgodClient. A 404 is a node without the

@@ -203,7 +203,7 @@ func capsFromConfig(cfg ports.NodeConfig, prev domain.Capabilities, lastRound ui
 		DeveloperAPI: cfg.EnableDeveloperAPI, FollowMode: cfg.EnableFollowMode, ExperimentalAPI: cfg.EnableExperimentalAPI,
 		TimeTravel: cfg.EnableTimeTravel, HoldersIndex: cfg.HoldersIndex(),
 		GenesisID: cfg.GenesisID, StorageEngine: cfg.StorageEngine, MaxAcctLookback: cfg.MaxAcctLookback,
-		AlgodVersion: prev.AlgodVersion, Simulate: prev.Simulate,
+		AlgodVersion: prev.AlgodVersion, AlgodCommit: prev.AlgodCommit, Dtalgorand: prev.Dtalgorand, Simulate: prev.Simulate,
 		HistoryUntrusted: prev.HistoryUntrusted, TTRoundHeader: prev.TTRoundHeader,
 	}
 	switch {
@@ -264,14 +264,14 @@ func (m *Monitor) awaitOnline(ctx context.Context, b *backoff) bool {
 			m.update(func(s *LocalState) {
 				s.Online, s.LastRound, s.LastStatus, s.LastError = true, st.LastRound, st.Raw, ""
 				if verr == nil {
-					s.Caps.AlgodVersion = ver.Build
+					s.Caps.AlgodVersion, s.Caps.AlgodCommit = ver.Build, ver.Commit
 					if s.Caps.GenesisID == "" {
 						s.Caps.GenesisID = ver.GenesisID
 					}
 				}
 				s.LimitsKnown = lerr == nil
 				if lerr == nil {
-					s.Caps.Simulate = lim
+					s.Caps.Simulate, s.Caps.Dtalgorand = lim, lim != nil
 				}
 				s.Caps.OldestRound = domain.OldestRoundFor(s.Caps.Archival, s.LastRound)
 				s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
@@ -326,7 +326,7 @@ func (m *Monitor) watch(ctx context.Context) {
 		}
 		m.update(func(s *LocalState) {
 			if known && !s.LimitsKnown {
-				s.LimitsKnown, s.Caps.Simulate = true, lim
+				s.LimitsKnown, s.Caps.Simulate, s.Caps.Dtalgorand = true, lim, lim != nil
 			}
 			s.Online, s.LastRound, s.LastStatus, s.LastError = true, st.LastRound, st.Raw, ""
 			s.Caps.OldestRound = domain.OldestRoundFor(s.Caps.Archival, s.LastRound)
@@ -558,7 +558,7 @@ func (m *Monitor) refreshLimits(ctx context.Context) {
 		return
 	}
 	m.update(func(s *LocalState) {
-		s.LimitsKnown, s.Caps.Simulate = true, lim
+		s.LimitsKnown, s.Caps.Simulate, s.Caps.Dtalgorand = true, lim, lim != nil
 		s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
 	})
 }

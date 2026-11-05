@@ -24,6 +24,7 @@ type Status struct {
 type Versions struct {
 	GenesisID string
 	Build     string
+	Commit    string // the commit the binary was built from; "" when not reported
 }
 
 // NodeCapabilities is what a dtalgorand node reports at GET
