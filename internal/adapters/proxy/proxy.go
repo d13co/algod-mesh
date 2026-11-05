@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -45,7 +44,7 @@ func New(rt http.RoundTripper) *Forwarder {
 			DisableCompression: true,
 		}
 	}
-	return &Forwarder{transport: rt, RetryableStatus: map[int]bool{502: true, 503: true, 504: true}}
+	return &Forwarder{transport: rt, RetryableStatus: map[int]bool{429: true, 502: true, 503: true, 504: true}}
 }
 
 type upstreamRejected struct{ status int }
@@ -71,7 +70,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
-			out.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+			out.RetryAfter = ports.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 			if t.Check != nil {
 				msg := peekMessage(resp)
 				if !t.Check(resp.StatusCode, resp.Header, msg) {
@@ -113,27 +112,6 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 		}
 	}
 	return out
-}
-
-// retryAfter reads a Retry-After, in seconds or as an HTTP date. A value of
-// 0 or a date already past reads as one second: the upstream still asked
-// for a retry. A missing or unreadable one reads as none (0).
-func retryAfter(v string, now time.Time) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	if n, err := strconv.Atoi(v); err == nil {
-		if n < 0 {
-			return 0
-		}
-		return max(time.Duration(n)*time.Second, time.Second)
-	}
-	at, err := http.ParseTime(v)
-	if err != nil {
-		return 0
-	}
-	return max(at.Sub(now).Round(time.Second), time.Second)
 }
 
 // maxErrorBody bounds how much of a withheld answer is read for its message.
