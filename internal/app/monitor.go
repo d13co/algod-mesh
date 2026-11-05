@@ -545,9 +545,9 @@ func (m *Monitor) probeHistory(ctx context.Context) {
 	m.probed = true
 }
 
-// refreshLimits reads the simulate limits again, for an algod restarted with
-// a new config without the agent seeing it go away, and checks the running
-// config against config.json.
+// refreshLimits reads the simulate limits and the version again, for an algod
+// restarted with a new config or binary without the agent seeing it go away,
+// and checks the running config against config.json.
 func (m *Monitor) refreshLimits(ctx context.Context) {
 	if !m.State().Online {
 		return
@@ -557,8 +557,14 @@ func (m *Monitor) refreshLimits(ctx context.Context) {
 		m.log.Debug("simulate limits re-read failed", "err", err)
 		return
 	}
+	vctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
+	ver, verr := m.algod.Versions(vctx)
+	cancel()
 	m.update(func(s *LocalState) {
 		s.LimitsKnown, s.Caps.Simulate, s.Caps.Dtalgorand = true, lim, lim != nil
+		if verr == nil {
+			s.Caps.AlgodVersion, s.Caps.AlgodCommit = ver.Build, ver.Commit
+		}
 		s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
 	})
 }

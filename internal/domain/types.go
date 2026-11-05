@@ -83,7 +83,8 @@ type Capabilities struct {
 	// AlgodVersion, so this is what tells its builds apart.
 	AlgodCommit string `json:"algod_commit,omitempty"`
 	// Dtalgorand is a node that answers GET /v2/capabilities, which a stock
-	// algod does not. The agent sets it; an external is never marked.
+	// algod does not. The agent sets it; an external is never marked. Routing
+	// goes by Simulate instead, which an override can also set.
 	Dtalgorand      bool   `json:"dtalgorand,omitempty"`
 	GenesisID       string `json:"genesis_id,omitempty"`
 	StorageEngine   string `json:"storage_engine,omitempty"`
