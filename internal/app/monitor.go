@@ -203,7 +203,7 @@ func capsFromConfig(cfg ports.NodeConfig, prev domain.Capabilities, lastRound ui
 		DeveloperAPI: cfg.EnableDeveloperAPI, FollowMode: cfg.EnableFollowMode, ExperimentalAPI: cfg.EnableExperimentalAPI,
 		TimeTravel: cfg.EnableTimeTravel, HoldersIndex: cfg.HoldersIndex(),
 		GenesisID: cfg.GenesisID, StorageEngine: cfg.StorageEngine, MaxAcctLookback: cfg.MaxAcctLookback,
-		AlgodVersion: prev.AlgodVersion, Simulate: prev.Simulate,
+		AlgodVersion: prev.AlgodVersion, AlgodCommit: prev.AlgodCommit, Dtalgorand: prev.Dtalgorand, Simulate: prev.Simulate,
 		HistoryUntrusted: prev.HistoryUntrusted, TTRoundHeader: prev.TTRoundHeader,
 	}
 	switch {
@@ -264,14 +264,14 @@ func (m *Monitor) awaitOnline(ctx context.Context, b *backoff) bool {
 			m.update(func(s *LocalState) {
 				s.Online, s.LastRound, s.LastStatus, s.LastError = true, st.LastRound, st.Raw, ""
 				if verr == nil {
-					s.Caps.AlgodVersion = ver.Build
+					s.Caps.AlgodVersion, s.Caps.AlgodCommit = ver.Build, ver.Commit
 					if s.Caps.GenesisID == "" {
 						s.Caps.GenesisID = ver.GenesisID
 					}
 				}
 				s.LimitsKnown = lerr == nil
 				if lerr == nil {
-					s.Caps.Simulate = lim
+					s.Caps.Simulate, s.Caps.Dtalgorand = lim, lim != nil
 				}
 				s.Caps.OldestRound = domain.OldestRoundFor(s.Caps.Archival, s.LastRound)
 				s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
@@ -326,7 +326,7 @@ func (m *Monitor) watch(ctx context.Context) {
 		}
 		m.update(func(s *LocalState) {
 			if known && !s.LimitsKnown {
-				s.LimitsKnown, s.Caps.Simulate = true, lim
+				s.LimitsKnown, s.Caps.Simulate, s.Caps.Dtalgorand = true, lim, lim != nil
 			}
 			s.Online, s.LastRound, s.LastStatus, s.LastError = true, st.LastRound, st.Raw, ""
 			s.Caps.OldestRound = domain.OldestRoundFor(s.Caps.Archival, s.LastRound)
@@ -545,9 +545,9 @@ func (m *Monitor) probeHistory(ctx context.Context) {
 	m.probed = true
 }
 
-// refreshLimits reads the simulate limits again, for an algod restarted with
-// a new config without the agent seeing it go away, and checks the running
-// config against config.json.
+// refreshLimits reads the simulate limits and the version again, for an algod
+// restarted with a new config or binary without the agent seeing it go away,
+// and checks the running config against config.json.
 func (m *Monitor) refreshLimits(ctx context.Context) {
 	if !m.State().Online {
 		return
@@ -557,8 +557,14 @@ func (m *Monitor) refreshLimits(ctx context.Context) {
 		m.log.Debug("simulate limits re-read failed", "err", err)
 		return
 	}
+	vctx, cancel := context.WithTimeout(ctx, m.opts.StatusTimeout)
+	ver, verr := m.algod.Versions(vctx)
+	cancel()
 	m.update(func(s *LocalState) {
-		s.LimitsKnown, s.Caps.Simulate = true, lim
+		s.LimitsKnown, s.Caps.Simulate, s.Caps.Dtalgorand = true, lim, lim != nil
+		if verr == nil {
+			s.Caps.AlgodVersion, s.Caps.AlgodCommit = ver.Build, ver.Commit
+		}
 		s.Caps = m.opts.Overrides.Apply(s.Caps, s.LastRound)
 	})
 }

@@ -187,18 +187,21 @@ func TestMonitorReadsCapabilities(t *testing.T) {
 	if got := m.State().Caps.Simulate; got == nil || *got != lim {
 		t.Fatalf("limits %+v, want %+v", got, lim)
 	}
+	if c := m.State().Caps; !c.Dtalgorand || c.AlgodCommit != "fake-dt" || c.AlgodVersion == "" {
+		t.Fatalf("dtalgorand %v, commit %q, version %q; want a dtalgorand at fake-dt", c.Dtalgorand, c.AlgodCommit, c.AlgodVersion)
+	}
 	// The limits survive the round updates, and are not asked again.
 	n.Advance(1)
 	waitFor(t, 2*time.Second, func() bool { return m.State().LastRound == 51 })
-	if m.State().Caps.Simulate == nil {
-		t.Fatal("limits dropped on round update")
+	if m.State().Caps.Simulate == nil || !m.State().Caps.Dtalgorand || m.State().Caps.AlgodCommit == "" {
+		t.Fatal("limits, dtalgorand or commit dropped on round update")
 	}
 	if hits := n.Hits("/v2/capabilities"); hits != 1 {
 		t.Fatalf("limits asked %d times, want once", hits)
 	}
 
-	if m, _ := run(fakealgod.Options{ID: "stock", StartRound: 50}, nil); m.State().Caps.Simulate != nil {
-		t.Fatalf("stock node reported limits %+v", m.State().Caps.Simulate)
+	if m, _ := run(fakealgod.Options{ID: "stock", StartRound: 50}, nil); m.State().Caps.Simulate != nil || m.State().Caps.Dtalgorand {
+		t.Fatalf("stock node reported limits %+v, dtalgorand %v", m.State().Caps.Simulate, m.State().Caps.Dtalgorand)
 	}
 
 	// An override wins over what the node reports.

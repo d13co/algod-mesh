@@ -342,7 +342,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"id": strings.TrimSuffix(n.opts.GenesisID, "-v1.0"), "network": n.opts.GenesisID})
 	case p == "/versions":
 		writeJSON(w, 200, map[string]any{"genesis_id": n.opts.GenesisID, "versions": []string{"v2"},
-			"build": map[string]any{"major": 3, "minor": 99, "build_number": 0, "channel": "fake"}})
+			"build": map[string]any{"major": 3, "minor": 99, "build_number": 0, "channel": "fake", "commit_hash": "fake-" + n.opts.ID}})
 	case p == "/v2/status":
 		writeJSON(w, 200, n.status(round))
 	case seg(0) == "v2" && seg(1) == "status" && seg(2) == "wait-for-block-after":
