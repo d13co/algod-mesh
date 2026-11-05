@@ -125,8 +125,8 @@ func TestRetryAfter(t *testing.T) {
 		"Wed, 21 Oct 2026 07:28:07 GMT": 7 * time.Second,
 		"Wed, 21 Oct 2026 07:00:00 GMT": time.Second,
 	} {
-		if got := retryAfter(v, now); got != want {
-			t.Errorf("retryAfter(%q) = %v, want %v", v, got, want)
+		if got := ports.ParseRetryAfter(v, now); got != want {
+			t.Errorf("ParseRetryAfter(%q) = %v, want %v", v, got, want)
 		}
 	}
 }

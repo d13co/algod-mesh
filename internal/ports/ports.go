@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/d13co/algod-mesh/internal/domain"
@@ -176,7 +178,9 @@ type Outcome struct {
 	Refused bool
 }
 
-// Failed is true when the outcome should count against the upstream.
+// Failed is true when the attempt failed and another upstream may be tried.
+// A 429 is one, but is not held against the upstream: it is throttled for a
+// while instead (see app.StatsBook.Record).
 func (o Outcome) Failed() bool {
 	return o.Err != nil || o.Status >= 500 || o.Status == 429
 }
@@ -217,3 +221,24 @@ func (notFound) Error() string { return "not found" }
 
 // ErrNotFound is the sentinel adapters return for a missing box or block.
 var ErrNotFound error = notFound{}
+
+// ParseRetryAfter reads a Retry-After, in seconds or as an HTTP date. A
+// value of 0 or a date already past reads as one second: the upstream still
+// asked for a retry. A missing or unreadable one reads as none (0).
+func ParseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 {
+			return 0
+		}
+		return max(time.Duration(n)*time.Second, time.Second)
+	}
+	at, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	return max(at.Sub(now).Round(time.Second), time.Second)
+}

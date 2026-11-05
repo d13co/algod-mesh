@@ -1,6 +1,7 @@
 package app
 
 import (
+	"net/http"
 	"sync"
 	"time"
 
@@ -83,6 +84,15 @@ func (b *StatsBook) Record(id, key string, out ports.Outcome) {
 	defer b.mu.Unlock()
 	s := b.get(id)
 	now := b.clock.Now()
+	if out.Status == http.StatusTooManyRequests {
+		// The node, or the provider behind an external, has no room for
+		// more requests from the mesh: none goes to it until it says, and
+		// it is not failing.
+		if until := now.Add(throttleFor(out)); until.After(s.throttledUntil) {
+			s.throttledUntil = until
+		}
+		return
+	}
 	failed := out.Failed()
 	s.window[s.windowPos] = failed
 	s.windowPos = (s.windowPos + 1) % len(s.window)
@@ -95,9 +105,6 @@ func (b *StatsBook) Record(id, key string, out ports.Outcome) {
 			s.openUntil = now.Add(b.opts.OpenFor)
 			s.probing = true
 		}
-		if out.Status == 429 {
-			s.throttledUntil = now.Add(b.opts.OpenFor)
-		}
 		return
 	}
 	s.failures = 0
@@ -108,6 +115,12 @@ func (b *StatsBook) Record(id, key string, out ports.Outcome) {
 	} else {
 		s.latency[key] = ms
 	}
+}
+
+// throttleFor is how long a node that answered 429 gets no requests: its
+// Retry-After, at least a second when it gives none, and at most maxBusy.
+func throttleFor(out ports.Outcome) time.Duration {
+	return min(max(out.RetryAfter, time.Second), maxBusy)
 }
 
 // Busy marks an upstream that answered a request taking slot with 503 and

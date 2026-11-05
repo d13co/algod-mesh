@@ -508,6 +508,11 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		r.stats.HoldersMissing(u.ID, holdersMissingFor)
 		r.metric.Inc("mesh_upstream_holders_missing", "upstream", u.ID)
 		r.log.Warn("upstream has no usable asset holders index", "upstream", u.ID)
+	case out.Status == http.StatusTooManyRequests:
+		// The node has no room for more requests from the mesh: send none
+		// to it for its Retry-After, without holding it against the node.
+		r.stats.Record(u.ID, class.StatKey(), out)
+		r.metric.Inc("mesh_upstream_throttled", "upstream", u.ID)
 	case busy(class, out):
 		// The node has no room for more requests of this kind: send them
 		// elsewhere for a while, and the rest as before.
@@ -566,6 +571,20 @@ var timeLimitPass = map[int]bool{http.StatusGatewayTimeout: true}
 // no room for more: 503 with Retry-After.
 func busy(class domain.RequestClass, out ports.Outcome) bool {
 	return class.Slot() != domain.SlotNone && out.Status == http.StatusServiceUnavailable && out.RetryAfter > 0
+}
+
+// full reports an answer from a node with no room for the request: busy, or
+// 429 to any request. The client is told to retry, unlike for a failure.
+func full(class domain.RequestClass, out ports.Outcome) bool {
+	return busy(class, out) || out.Status == http.StatusTooManyRequests
+}
+
+// retryIn is how soon a full node takes requests again.
+func retryIn(out ports.Outcome) time.Duration {
+	if out.Status == http.StatusTooManyRequests {
+		return throttleFor(out)
+	}
+	return out.RetryAfter
 }
 
 // holdersMissing reports dtalgorand's answer to a holders page while its
@@ -727,6 +746,11 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
 		return
 	}
+	if throttledCouldServe(cands, class, best, r.opts.SyncTolerance) {
+		w.Header().Set("Retry-After", "1")
+		writeMessage(w, 503, "algod-mesh: every node able to serve this request is rate limiting the mesh")
+		return
+	}
 	writeMessage(w, 503, "algod-mesh: no eligible upstream for this request")
 }
 
@@ -752,6 +776,23 @@ func anyBusy(us []domain.Upstream, slot domain.Slot) bool {
 	}
 	return false
 }
+
+// throttledCouldServe reports whether a candidate that is not excluded would
+// be eligible for the request but for having answered 429 lately.
+func throttledCouldServe(us []domain.Upstream, class domain.RequestClass, best uint64, tolerance uint64) bool {
+	for _, u := range us {
+		if u.Stats.Throttled && !u.Excluded {
+			u.Stats.Throttled = false
+			if domain.Eligible(u, class, best, tolerance) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// throttledTriedMessage answers a request every node tried answered 429.
+const throttledTriedMessage = "algod-mesh: the nodes tried are rate limiting the mesh"
 
 // anyTimeTravel reports whether any candidate that is not excluded
 // advertises the history.
@@ -1008,12 +1049,13 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 	if !replay {
 		tries = tries[:1]
 	}
-	// last is the latest attempt's outcome, busyOut the busy answer with the
-	// soonest Retry-After: a client told to retry then may get a node that
-	// was only busy, where the last node tried may have failed for longer.
+	// last is the latest attempt's outcome, busyOut the busy or throttled
+	// answer with the soonest retry: a client told to retry then may get a
+	// node that was only full, where the last node tried may have failed for
+	// longer.
 	var last, busyOut ports.Outcome
 	note := func(out ports.Outcome) {
-		if busy(class, out) && (busyOut.Status == 0 || out.RetryAfter < busyOut.RetryAfter) {
+		if full(class, out) && (busyOut.Status == 0 || retryIn(out) < retryIn(busyOut)) {
 			busyOut = out
 		}
 	}
@@ -1108,6 +1150,11 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 	case busy(class, out):
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(out.RetryAfter), 10))
 		writeMessage(w, 503, "algod-mesh: every node able to serve this request is busy")
+	case out.Status == http.StatusTooManyRequests:
+		// The node limits the mesh, not this client: a 503 to retry, not
+		// the node's 429, which the client would take for its own limit.
+		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(throttleFor(out)), 10))
+		writeMessage(w, 503, throttledTriedMessage)
 	case historyUntrusted(class, out):
 		if cands, _ := r.dir.Snapshot(); allHistoryUntrusted(cands) {
 			writeMessage(w, 503, historyUntrustedMessage)
@@ -1126,7 +1173,7 @@ func (r *Router) answerFailure(w http.ResponseWriter, req *http.Request, class d
 		} else {
 			writeMessage(w, 503, holdersMissingTriedMessage)
 		}
-	case out.Status >= 500 || out.Status == 429:
+	case out.Status >= 500:
 		writeMessage(w, 502, fmt.Sprintf("algod-mesh: upstream answered %d", out.Status))
 	default:
 		writeMessage(w, 502, "algod-mesh: upstream unreachable")
@@ -1350,6 +1397,7 @@ func (r *Router) getStatus(ctx context.Context, u domain.Upstream, class domain.
 	var body []byte
 	if err == nil {
 		out.Status = resp.StatusCode
+		out.RetryAfter = ports.ParseRetryAfter(resp.Header.Get("Retry-After"), r.clock.Now())
 		body, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		if err == nil && resp.StatusCode != 200 {
@@ -1358,6 +1406,9 @@ func (r *Router) getStatus(ctx context.Context, u domain.Upstream, class domain.
 	}
 	out.Duration = r.clock.Now().Sub(start)
 	r.stats.Record(u.ID, class.StatKey(), out)
+	if out.Status == http.StatusTooManyRequests {
+		r.metric.Inc("mesh_upstream_throttled", "upstream", u.ID)
+	}
 	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed() || err != nil))
 	if err != nil {
 		return 0, nil, err
@@ -1484,7 +1535,7 @@ func meshFirst(us []domain.Upstream) []domain.Upstream {
 // withheldStatus is true for the upstream statuses the forwarder withholds
 // from the client as failures of the upstream rather than answers.
 func withheldStatus(code int) bool {
-	return code == 502 || code == 503 || code == 504
+	return code == 429 || code == 502 || code == 503 || code == 504
 }
 
 // maxFanBody bounds one buffered upstream answer; pending lookups of
@@ -1525,9 +1576,13 @@ func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, tar
 			out := ports.Outcome{Err: res.err, Duration: r.clock.Now().Sub(start)}
 			if resp != nil {
 				out.Status = resp.StatusCode
+				out.RetryAfter = ports.ParseRetryAfter(resp.Header.Get("Retry-After"), r.clock.Now())
 			}
 			if ctx.Err() == nil { // not cancelled by us or the client: the outcome is about the upstream
 				r.stats.Record(u.ID, class.StatKey(), out)
+				if out.Status == http.StatusTooManyRequests {
+					r.metric.Inc("mesh_upstream_throttled", "upstream", u.ID)
+				}
 			}
 			r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
 			results <- res
@@ -1538,6 +1593,15 @@ func (r *Router) fanOut(ctx context.Context, req *http.Request, body []byte, tar
 
 // writeFan relays a buffered upstream answer with its end-to-end headers.
 func writeFan(w http.ResponseWriter, res fanResult) {
+	if res.resp.StatusCode == http.StatusTooManyRequests {
+		// The node limits the mesh, not this client (see answerFailure).
+		out := ports.Outcome{Status: res.resp.StatusCode, RetryAfter: ports.ParseRetryAfter(res.resp.Header.Get("Retry-After"), time.Now())}
+		w.Header().Set("X-Algod-Mesh-Upstream", res.u.ID)
+		w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(res.u.Tier))
+		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(throttleFor(out)), 10))
+		writeMessage(w, 503, throttledTriedMessage)
+		return
+	}
 	for k, vs := range res.resp.Header {
 		switch k {
 		case "Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "Trailer", "Upgrade",
