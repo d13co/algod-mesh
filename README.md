@@ -67,7 +67,7 @@ Building needs Go 1.27 or newer.
 
 ## Install
 
-Linux, amd64 or arm64. Run the installer as your normal user: it downloads and verifies as you, and uses sudo only to install.
+Linux, amd64 or arm64 (macOS: [Homebrew](#homebrew-on-macos), below). Run the installer as your normal user: it downloads and verifies as you, and uses sudo only to install.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/d13co/algod-mesh/stable/install.sh | bash
@@ -159,6 +159,16 @@ The agents are down from step 3 until step 4 starts them, a few seconds; algod k
 - If you had deleted `51algod-loadb-mesh-upgrades` to upgrade by hand only, also delete the new `/etc/apt/apt.conf.d/51algod-mesh-upgrades`.
 
 </details>
+
+### Homebrew on macOS
+
+On macOS (Apple silicon or Intel), or with Homebrew on Linux, install from the d13co tap:
+
+```sh
+brew install d13co/tap/algod-mesh
+```
+
+That installs `algod-mesh` only: `algod-mesh-autoconfig` and `algod-mesh-setup` are for systemd hosts. Write the config by hand (`algod-mesh config example`, see the formula's caveats for where), then `brew services start algod-mesh`. `brew upgrade` brings new releases; `brew services restart algod-mesh` runs them.
 
 ## Set up a fleet
 
