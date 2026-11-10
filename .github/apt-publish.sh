@@ -29,8 +29,11 @@ aws s3 sync $BUCKET/pool "$REPO/pool" $R2
 : >"$REPO/old/allowed"
 if [ $# -gt 0 ]; then sha256sum "$@" | cut -d' ' -f1 >>"$REPO/old/allowed"; fi
 if [ -n "$(find "$REPO/pool" -type f)" ]; then
-  aws s3 cp $BUCKET/dists/stable/InRelease "$REPO/old/InRelease" $R2
-  gpg --yes --status-fd 3 -o "$REPO/old/Release" -d "$REPO/old/InRelease" 3>"$REPO/old/status" 2>/dev/null
+  # Don't carry on without it: deleting InRelease would then get anything in the pool signed.
+  aws s3 cp $BUCKET/dists/stable/InRelease "$REPO/old/InRelease" $R2 ||
+    { echo "apt-publish: the bucket has a pool but no signed index; if a first publish stopped half-way, empty the bucket's pool and run again" >&2; exit 1; }
+  # The VALIDSIG check below reports a bad signature, so don't stop on gpg's exit status.
+  gpg --yes --status-fd 3 -o "$REPO/old/Release" -d "$REPO/old/InRelease" 3>"$REPO/old/status" 2>/dev/null || true
   grep -q "^\[GNUPG:\] VALIDSIG .* $PRIMARY\$" "$REPO/old/status" ||
     { echo "apt-publish: the bucket's InRelease is not signed by $PRIMARY" >&2; exit 1; }
   for a in $ARCHES; do
@@ -43,8 +46,13 @@ if [ -n "$(find "$REPO/pool" -type f)" ]; then
 fi
 
 # apt-ftparchive --arch filters on the filename, so name each .deb from its own fields.
+# A version is published once: apt clients and the release's checksums have its hash.
 for f in "$@"; do
-  cp "$f" "$REPO/pool/$(dpkg-deb -f "$f" Package)_$(dpkg-deb -f "$f" Version)_$(dpkg-deb -f "$f" Architecture).deb"
+  p=$REPO/pool/$(dpkg-deb -f "$f" Package)_$(dpkg-deb -f "$f" Version)_$(dpkg-deb -f "$f" Architecture).deb
+  if [ -f "$p" ] && ! cmp -s "$f" "$p"; then
+    echo "apt-publish: $p is already published with other contents; bump the version instead" >&2; exit 1
+  fi
+  cp "$f" "$p"
 done
 find "$REPO/pool" -type f | while read -r f; do
   grep -qx "$(sha256sum "$f" | cut -d' ' -f1)" "$REPO/old/allowed" ||
@@ -59,7 +67,11 @@ for a in $ARCHES; do   # --arch also takes Architecture: all packages
   gzip -9kf $d/main/binary-$a/Packages
 done
 rm -f $d/Release $d/InRelease   # else the new Release hashes the old one
+# by-hash: apt then fetches each Packages by its hash, so a client never pairs a new InRelease
+# with an old Packages (or the other way round) while the upload or the CDN cache catches up.
 apt-ftparchive \
+  -o APT::FTPArchive::DoByHash=true \
+  -o APT::FTPArchive::Release::Acquire-By-Hash=yes \
   -o APT::FTPArchive::Release::Suite=stable \
   -o APT::FTPArchive::Release::Codename=stable \
   -o APT::FTPArchive::Release::Components=main \
@@ -69,10 +81,12 @@ mv Release.tmp $d/Release
 gpg --yes ${GPG_PASSPHRASE_FILE:+--batch --pinentry-mode loopback --passphrase-file "$GPG_PASSPHRASE_FILE"} \
   -u "$KEY" --clearsign -o $d/InRelease $d/Release
 
-# Pool first, so the new index never points at a .deb that isn't up yet.
+# Pool first, then the Packages files, then Release and InRelease, so that everything an index lists
+# is up before the index. sync uploads in parallel, so the last two go up on their own.
 # The index gets a short cache so Cloudflare serves a new release within a minute.
-# ponytail: never deletes old .debs from the bucket; prune there by hand if it grows.
+# ponytail: never deletes old .debs or by-hash files from the bucket; prune there by hand if it grows.
 aws s3 sync pool $BUCKET/pool $R2
-aws s3 sync dists $BUCKET/dists $R2 --cache-control max-age=60
+aws s3 sync dists $BUCKET/dists $R2 --cache-control max-age=60 --exclude '*Release'
+for f in Release InRelease; do aws s3 cp $d/$f $BUCKET/$d/$f $R2 --cache-control max-age=60; done
 # key.asc changes only when the subkey is renewed, and that's done by hand.
 if [ -f key.asc ]; then aws s3 cp key.asc $BUCKET/key.asc $R2; fi
