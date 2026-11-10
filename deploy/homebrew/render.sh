@@ -13,6 +13,7 @@ set -eu
 ver=$1 url=${2%/} sums=$3
 case $ver in *[!A-Za-z0-9.+~-]*|'') echo "bad version: $ver" >&2; exit 2 ;; esac
 case $url in *[!A-Za-z0-9:/._~+-]*|'') echo "bad url: $url" >&2; exit 2 ;; esac
+[ -f "$sums" ] || { echo "no checksums file: $sums" >&2; exit 2; }
 [ "${url##*/}" = "v$ver" ] || { echo "the url isn't release v$ver's: $url" >&2; exit 2; }
 
 sha() {

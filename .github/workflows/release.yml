@@ -132,6 +132,8 @@ jobs:
       - name: Update the formula
         run: |
           v=${GITHUB_REF_NAME#v}
+          # sort -V below puts 1.2.3-rc1 after 1.2.3, so an rc in the tap would hold off 1.2.3
+          case $v in *-*) echo "$v is a prerelease; the tap gets releases only"; exit 0 ;; esac
           url=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME
           cd tap
           git config user.name github-actions[bot]

@@ -44,9 +44,10 @@ class AlgodMesh < Formula
       The service reads #{etc}/algod-mesh/config.yaml. Start from an example:
         mkdir -p #{etc}/algod-mesh
         algod-mesh config example -o #{etc}/algod-mesh/config.yaml
-      and set local.data_dir to your node's data directory (#{var}/dtalgorand for the
-      dtalgorand formula). Keep state files (registry.cache, rate limit state_file) under
-      #{var}/algod-mesh. Check it with
+      and fill it in: local.data_dir is your node's data directory (#{var}/dtalgorand for the
+      dtalgorand formula), and registry.app_id your fleet's registry app (or use a static
+      registry). Keep state files (registry.cache, rate limit state_file) under
+      #{var}/algod-mesh. Then check it with
         algod-mesh config check -config #{etc}/algod-mesh/config.yaml
 
       Start the agent, and have it start at login:

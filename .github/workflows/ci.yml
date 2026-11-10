@@ -34,6 +34,8 @@ jobs:
           cache: true
       - run: make lint
       - run: make build
+      # The release also builds darwin binaries for the Homebrew formula: break them here, not on a tag.
+      - run: GOOS=darwin GOARCH=arm64 make build && GOOS=darwin GOARCH=amd64 make build && make build
       - run: make test
       - run: make race
       # The scripts install.sh ships: a syntax error there breaks every host.
