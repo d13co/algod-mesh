@@ -67,6 +67,8 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 			pr.Out.Host = target.Host
 			pr.Out.Header.Set("X-Algo-API-Token", t.Token)
 			pr.Out.Header.Del("X-Forwarded-For")
+			// The router's to choose: a peer agent must not be pinned again.
+			pr.Out.Header.Del("X-Algod-Mesh-Upstream")
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode

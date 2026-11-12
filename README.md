@@ -293,6 +293,21 @@ What this means in practice:
 
 Every response says who answered it, in the `X-Algod-Mesh-Upstream`, `X-Algod-Mesh-Tier` and `X-Algod-Mesh-Mode` headers.
 
+#### Pinning a request to one upstream
+
+An admin can send a request to one specific backend by setting the same `X-Algod-Mesh-Upstream` header on the request. This is useful for debugging a single node, comparing answers across nodes, or checking a node that routing is avoiding. Use an ID as it appears in `/mesh/peers` or in a response's `X-Algod-Mesh-Upstream` header: the local node, a peer, or an external's `name`.
+
+```sh
+curl -si -H 'X-Algo-API-Token: <admin token>' -H 'X-Algod-Mesh-Upstream: node-b' http://127.0.0.1:4000/v2/status
+```
+
+- **Admin only.** The request needs the admin token, or auth must be off altogether (as for `/mesh`). A request the agent would otherwise serve, such as one with the client token, gets 403; a token the agent doesn't know gets the usual 401. `/mesh/*` requests can't be pinned: the header is ignored there.
+- **Forced.** The request goes to that upstream whatever its health, lag, capabilities, draining or `routing.exclude` state. It is tried once, with no retry and no external fallback, and the client gets the node's answer as it was sent, 429 and 5xx included. The agent answers itself only when the node can't be reached (502) or times out (504).
+- **Invisible to routing.** A pinned request's answer doesn't change how the agent routes other requests: a failure, timeout, 429 or busy answer doesn't count against the node, open its circuit breaker or hold it back. It still shows in the per-upstream request and latency metrics.
+- **No special handling.** Wait-for-block coalescing, multi-broadcast and pending-transaction lookups are skipped: the request is simply forwarded.
+- An unknown ID gets a 400, and an upstream with no known address a 503. An ID that names more than one upstream, such as a peer that calls itself after one of your externals, gets a 400 rather than a guess. The config already refuses an external named twice or after `local.id`.
+- The header is never forwarded to the backend.
+
 ### Time-travel nodes
 
 A node built from the time-travel fork (`EnableTimeTravel` in `config.json`) keeps every ledger object's value at every round, so it can answer state questions about any past round. Stock algod reaches back much less, and how far depends on the request:

@@ -228,7 +228,7 @@ func decodeBody[T any](b []byte, v *T) bool {
 func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.RequestClass, start time.Time) {
 	kv := []any{"method", req.Method, "path", req.URL.RequestURI(), "status", w.status, "bytes", w.bytes,
 		"duration", r.clock.Now().Sub(start), "ip", clientIP(req)}
-	if up := w.Header().Get("X-Algod-Mesh-Upstream"); up != "" {
+	if up := w.Header().Get(upstreamHeader); up != "" {
 		kv = append(kv, "upstream", up)
 	}
 	if w.client != "" {
@@ -282,6 +282,65 @@ func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domai
 	return Identity{}, false
 }
 
+// adminAccess reports whether the request may do what /mesh/* may: it
+// carries the admin token, or auth is off altogether.
+func (r *Router) adminAccess(req *http.Request) bool {
+	if r.opts.AdminToken != "" {
+		return tokenEqual(req.Header.Get("X-Algo-API-Token"), r.opts.AdminToken)
+	}
+	return r.opts.ClientToken == "" && r.limiter == nil
+}
+
+// upstreamHeader names the upstream that answered a request. An admin may
+// send it on a request to have that upstream, and no other, answer it.
+const upstreamHeader = "X-Algod-Mesh-Upstream"
+
+// pinnedKey marks the context of a request an admin pinned to one upstream.
+type pinnedKey struct{}
+
+// servePinned forwards the request to the upstream named id, whatever its
+// state: online or not, synced or not, excluded or not, and able to serve
+// the request or not. It is tried once, and the client gets its answer as
+// it was sent, so that an admin sees what that node says.
+func (r *Router) servePinned(w http.ResponseWriter, req *http.Request, class domain.RequestClass, id string) {
+	w.Header().Set("X-Algod-Mesh-Mode", string(r.opts.Mode))
+	cands, _ := r.dir.Snapshot()
+	var u domain.Upstream
+	n := 0
+	for _, c := range cands {
+		if c.ID == id {
+			u, n = c, n+1
+		}
+	}
+	switch {
+	case n == 0:
+		writeMessage(w, 400, fmt.Sprintf("algod-mesh: unknown upstream %q", id))
+		return
+	case n > 1:
+		// A peer announced the name of an external: the config keeps the
+		// rest apart, but not what peers call themselves.
+		writeMessage(w, 400, fmt.Sprintf("algod-mesh: upstream id %q is ambiguous: %d upstreams have it", id, n))
+		return
+	case u.BaseURL == "":
+		writeMessage(w, 503, fmt.Sprintf("algod-mesh: upstream %q has no known address", id))
+		return
+	}
+	ctx, cancel := r.requestCtx(req)
+	defer cancel()
+	ctx = context.WithValue(ctx, pinnedKey{}, true)
+	r.metric.Inc("mesh_requests_pinned", "upstream", u.ID)
+	r.log.Debug("request pinned to an upstream", "upstream", u.ID, "path", req.URL.Path)
+	if out := r.forward(ctx, w, req, u, class, nil); out.Failed() && !out.HeadersSent {
+		r.answerFailure(w, req, class, out)
+	}
+}
+
+// passAll lets every status through to the client of a pinned request.
+var passAll = map[int]bool{
+	http.StatusTooManyRequests: true, http.StatusBadGateway: true,
+	http.StatusServiceUnavailable: true, http.StatusGatewayTimeout: true,
+}
+
 func tokenEqual(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
@@ -318,6 +377,15 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 	}
 	if class.Agent {
 		r.serveAgent(w, req)
+		return
+	}
+	if pin := req.Header.Get(upstreamHeader); pin != "" {
+		if !r.adminAccess(req) {
+			r.metric.Inc("mesh_requests_unauthorized")
+			writeMessage(w, 403, "algod-mesh: "+upstreamHeader+" needs the admin token")
+			return
+		}
+		r.servePinned(w, req, class, pin)
 		return
 	}
 	cands, best := r.dir.Snapshot()
@@ -386,7 +454,7 @@ func preflight(w http.ResponseWriter, req *http.Request) {
 		h.Add("Vary", "Access-Control-Request-Method")
 		h.Add("Vary", "Access-Control-Request-Headers")
 		h.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "X-Algo-API-Token,Content-Type")
+		h.Set("Access-Control-Allow-Headers", "X-Algo-API-Token,Content-Type,"+upstreamHeader)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -444,7 +512,7 @@ func (r *Router) pick(ctx context.Context, class domain.RequestClass, cands []do
 // on the request as a whole; the client's own context stays on req, so that
 // its departure is told apart from the request's deadline.
 func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
-	w.Header().Set("X-Algod-Mesh-Upstream", u.ID)
+	w.Header().Set(upstreamHeader, u.ID)
 	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(u.Tier))
 	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
@@ -473,9 +541,19 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 			return honorsRound(status, h, msg, want)
 		}
 	}
+	pinned := ctx.Value(pinnedKey{}) != nil
+	if pinned {
+		// No other node will be tried: the admin gets this one's answer.
+		target.Check, target.PassStatus = nil, passAll
+	}
 	out := r.fwd.Forward(w, req.WithContext(ctx), target)
 	release()
 	switch {
+	case pinned:
+		// Sent whatever the node's state, and answered as it was: an admin
+		// looking at a node must not change how the router sees it. Its
+		// answer is not read, so a 503 that is no fault of the node's, or
+		// a wait past the attempt's bound, would count as a failure.
 	case req.Context().Err() != nil, quotaExceeded(ctx):
 		// The client left, or its allowance ran out: nothing about the upstream.
 	case timeLimited && out.Status == http.StatusGatewayTimeout:
@@ -1202,7 +1280,7 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 			return
 		}
 		_ = err // on timeout algod itself answers with the current status; so do we
-		w.Header().Set("X-Algod-Mesh-Upstream", local.ID)
+		w.Header().Set(upstreamHeader, local.ID)
 		w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(local.Tier))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
@@ -1264,7 +1342,7 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	w.Header().Set("X-Algod-Mesh-Upstream", f.upstream.ID)
+	w.Header().Set(upstreamHeader, f.upstream.ID)
 	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
@@ -1307,7 +1385,7 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	w.Header().Set("X-Algod-Mesh-Upstream", f.upstream.ID)
+	w.Header().Set(upstreamHeader, f.upstream.ID)
 	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
@@ -1444,7 +1522,7 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
 		r.forwardSelected(ctx, cw, req, class, sel)
 		if cw.status == 200 {
-			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get("X-Algod-Mesh-Upstream"))
+			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get(upstreamHeader))
 		}
 		return
 	}
@@ -1596,7 +1674,7 @@ func writeFan(w http.ResponseWriter, res fanResult) {
 	if res.resp.StatusCode == http.StatusTooManyRequests {
 		// The node limits the mesh, not this client (see answerFailure).
 		out := ports.Outcome{Status: res.resp.StatusCode, RetryAfter: ports.ParseRetryAfter(res.resp.Header.Get("Retry-After"), time.Now())}
-		w.Header().Set("X-Algod-Mesh-Upstream", res.u.ID)
+		w.Header().Set(upstreamHeader, res.u.ID)
 		w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(res.u.Tier))
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(throttleFor(out)), 10))
 		writeMessage(w, 503, throttledTriedMessage)
@@ -1610,7 +1688,7 @@ func writeFan(w http.ResponseWriter, res fanResult) {
 		}
 		w.Header()[k] = vs
 	}
-	w.Header().Set("X-Algod-Mesh-Upstream", res.u.ID)
+	w.Header().Set(upstreamHeader, res.u.ID)
 	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(res.u.Tier))
 	w.WriteHeader(res.resp.StatusCode)
 	_, _ = w.Write(res.body)
@@ -1769,7 +1847,7 @@ func (s *statusWriter) begin(code int) {
 // exposedHeaders are those a browser client may read: the mesh's own (where
 // its answer came from, and what it cost and has left), and those dtalgorand
 // exposes, as the list replaces the node's.
-const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", X-Algod-Mesh-Upstream, X-Algod-Mesh-Tier, " +
+const exposedHeaders = "Retry-After, RateLimit, RateLimit-Policy, " + costHeader + ", " + upstreamHeader + ", X-Algod-Mesh-Tier, " +
 	domain.EffortHeader + ", " + domain.TTRoundHeader
 
 // cors runs as the final headers go out, after any upstream's were copied

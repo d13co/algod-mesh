@@ -38,6 +38,23 @@ func TestForwardStreamsAndSetsToken(t *testing.T) {
 	}
 }
 
+// The pin header is the router's: no backend sees it.
+func TestForwardDropsTheUpstreamHeader(t *testing.T) {
+	var got []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Values("X-Algod-Mesh-Upstream")
+	}))
+	defer up.Close()
+	req := httptest.NewRequest("GET", "/v2/status", nil)
+	req.Header.Set("X-Algod-Mesh-Upstream", "b")
+	if out := New(nil).Forward(httptest.NewRecorder(), req, ports.Target{BaseURL: up.URL}); out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("forwarded %q", got)
+	}
+}
+
 func TestForwardRetryableStatusIsNotStreamed(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
