@@ -85,6 +85,24 @@ func TestForwardRetryableStatusIsNotStreamed(t *testing.T) {
 	}
 }
 
+// PassAll streams whatever the forwarder or the target would withhold.
+func TestForwardPassAllStreamsEveryStatus(t *testing.T) {
+	for _, code := range []int{404, 500, 503} {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+			w.Write([]byte("node says"))
+		}))
+		f := New(nil)
+		f.RetryableStatus[500] = true
+		rec := httptest.NewRecorder()
+		out := f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, RetryStatus: map[int]bool{404: true}, PassAll: true})
+		up.Close()
+		if out.Status != code || !out.HeadersSent || rec.Code != code || rec.Body.String() != "node says" {
+			t.Fatalf("%d: outcome %+v, client got %d %q", code, out, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestForwardTransportError(t *testing.T) {
 	f := New(nil)
 	rec := httptest.NewRecorder()

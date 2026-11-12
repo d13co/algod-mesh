@@ -86,7 +86,7 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 			if t.OnResponse != nil {
 				t.OnResponse(resp.StatusCode, resp.Header)
 			}
-			if (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
+			if !t.PassAll && (f.RetryableStatus[resp.StatusCode] || t.RetryStatus[resp.StatusCode]) && !t.PassStatus[resp.StatusCode] {
 				if readMessage(resp) {
 					out.Message = errorMessage(resp.Body, resp.Header.Get("Content-Encoding"))
 				}

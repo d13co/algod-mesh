@@ -231,6 +231,9 @@ func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.Req
 	if up := w.Header().Get(upstreamHeader); up != "" {
 		kv = append(kv, "upstream", up)
 	}
+	if w.pinned {
+		kv = append(kv, "pinned", true)
+	}
 	if w.client != "" {
 		kv = append(kv, "client", w.client)
 	}
@@ -258,10 +261,9 @@ func (r *Router) logRequest(w *statusWriter, req *http.Request, class domain.Req
 // request is billed to: nobody (Exempt) unless a rate limit applies.
 func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domain.RequestClass) (Identity, bool) {
 	tok := req.Header.Get("X-Algo-API-Token")
-	admin := r.opts.AdminToken != "" && tokenEqual(tok, r.opts.AdminToken)
 	exempt := Identity{Exempt: true}
 	switch {
-	case admin, isHealth(req, class):
+	case r.isAdmin(req), isHealth(req, class):
 		return exempt, true
 	case class.Agent && r.opts.AdminToken == "" && r.opts.ClientToken == "" && r.limiter == nil:
 		return exempt, true // auth is off; a rate-limited endpoint is public, so /mesh never is
@@ -282,21 +284,23 @@ func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domai
 	return Identity{}, false
 }
 
-// adminAccess reports whether the request may do what /mesh/* may: it
-// carries the admin token, or auth is off altogether.
-func (r *Router) adminAccess(req *http.Request) bool {
-	if r.opts.AdminToken != "" {
-		return tokenEqual(req.Header.Get("X-Algo-API-Token"), r.opts.AdminToken)
-	}
-	return r.opts.ClientToken == "" && r.limiter == nil
+// isAdmin reports whether the request carries the admin token. With none
+// configured, nobody is the admin.
+func (r *Router) isAdmin(req *http.Request) bool {
+	return r.opts.AdminToken != "" && tokenEqual(req.Header.Get("X-Algo-API-Token"), r.opts.AdminToken)
 }
 
 // upstreamHeader names the upstream that answered a request. An admin may
 // send it on a request to have that upstream, and no other, answer it.
 const upstreamHeader = "X-Algod-Mesh-Upstream"
 
-// pinnedKey marks the context of a request an admin pinned to one upstream.
-type pinnedKey struct{}
+// algodWaitTimeout is how long algod holds a wait-for-block-after before
+// answering with its current status.
+const algodWaitTimeout = time.Minute
+
+// pinnedWaitTimeout bounds a pinned wait-for-block-after: past algod's own
+// timeout, so that the node's answer arrives rather than the agent's 504.
+const pinnedWaitTimeout = algodWaitTimeout + 10*time.Second
 
 // servePinned forwards the request to the upstream named id, whatever its
 // state: online or not, synced or not, excluded or not, and able to serve
@@ -304,6 +308,9 @@ type pinnedKey struct{}
 // it was sent, so that an admin sees what that node says.
 func (r *Router) servePinned(w http.ResponseWriter, req *http.Request, class domain.RequestClass, id string) {
 	w.Header().Set("X-Algod-Mesh-Mode", string(r.opts.Mode))
+	if sw, ok := w.(*statusWriter); ok {
+		sw.pinned = true
+	}
 	cands, _ := r.dir.Snapshot()
 	var u domain.Upstream
 	n := 0
@@ -325,20 +332,45 @@ func (r *Router) servePinned(w http.ResponseWriter, req *http.Request, class dom
 		writeMessage(w, 503, fmt.Sprintf("algod-mesh: upstream %q has no known address", id))
 		return
 	}
-	ctx, cancel := r.requestCtx(req)
-	defer cancel()
-	ctx = context.WithValue(ctx, pinnedKey{}, true)
 	r.metric.Inc("mesh_requests_pinned", "upstream", u.ID)
 	r.log.Debug("request pinned to an upstream", "upstream", u.ID, "path", req.URL.Path)
-	if out := r.forward(ctx, w, req, u, class, nil); out.Failed() && !out.HeadersSent {
+	if class.Broadcast {
+		// Where the transaction went, for the pending lookups that follow:
+		// the node may be one that does not pass it on to the mesh.
+		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
+		w = cw
+		defer func() {
+			if cw.status == 200 {
+				r.rememberTxn(txIDFrom(cw.buf.Bytes()), u.ID)
+			}
+		}()
+	}
+	if out := r.forwardPinned(w, req, u, class); out.Failed() && !out.HeadersSent {
 		r.answerFailure(w, req, class, out)
 	}
 }
 
-// passAll lets every status through to the client of a pinned request.
-var passAll = map[int]bool{
-	http.StatusTooManyRequests: true, http.StatusBadGateway: true,
-	http.StatusServiceUnavailable: true, http.StatusGatewayTimeout: true,
+// forwardPinned sends a pinned request to u once and passes its answer on
+// as it was sent. Nothing about it reaches the router's view of the node:
+// not its outcome, which is not read (a 503 that is no fault of the node's
+// would count as a failure), and not its time in flight, which would steer
+// routed requests away from a node an admin is looking at.
+func (r *Router) forwardPinned(w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass) ports.Outcome {
+	w.Header().Set(upstreamHeader, u.ID)
+	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(u.Tier))
+	// One attempt, bounded as a request and as an attempt are.
+	bound := min(r.opts.RequestTimeout, r.opts.UpstreamTimeout)
+	if class.WaitAfter != nil {
+		// algod holds the request for up to its own timeout before it
+		// answers with its current status: that answer must arrive.
+		bound = max(bound, pinnedWaitTimeout)
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), bound)
+	defer cancel()
+	out := r.fwd.Forward(w, req.WithContext(ctx), ports.Target{BaseURL: u.BaseURL, Token: u.Token, PassAll: true})
+	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
+	r.metric.Observe("mesh_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
+	return out
 }
 
 func tokenEqual(got, want string) bool {
@@ -380,9 +412,13 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		return
 	}
 	if pin := req.Header.Get(upstreamHeader); pin != "" {
-		if !r.adminAccess(req) {
+		if !r.isAdmin(req) {
 			r.metric.Inc("mesh_requests_unauthorized")
-			writeMessage(w, 403, "algod-mesh: "+upstreamHeader+" needs the admin token")
+			msg := "algod-mesh: " + upstreamHeader + " needs the admin token"
+			if r.opts.AdminToken == "" {
+				msg += ", and none is configured"
+			}
+			writeMessage(w, 403, msg)
 			return
 		}
 		r.servePinned(w, req, class, pin)
@@ -541,19 +577,9 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 			return honorsRound(status, h, msg, want)
 		}
 	}
-	pinned := ctx.Value(pinnedKey{}) != nil
-	if pinned {
-		// No other node will be tried: the admin gets this one's answer.
-		target.Check, target.PassStatus = nil, passAll
-	}
 	out := r.fwd.Forward(w, req.WithContext(ctx), target)
 	release()
 	switch {
-	case pinned:
-		// Sent whatever the node's state, and answered as it was: an admin
-		// looking at a node must not change how the router sees it. Its
-		// answer is not read, so a 503 that is no fault of the node's, or
-		// a wait past the attempt's bound, would count as a failure.
 	case req.Context().Err() != nil, quotaExceeded(ctx):
 		// The client left, or its allowance ran out: nothing about the upstream.
 	case timeLimited && out.Status == http.StatusGatewayTimeout:
@@ -1833,6 +1859,7 @@ type statusWriter struct {
 	// stops a simulation's meter and adds its headers.
 	onHeader func(int, http.Header)
 	client   string // who the rate limiter billed, for the log
+	pinned   bool   // an admin pinned the request to one upstream, for the log
 }
 
 // begin runs as the final status is set.

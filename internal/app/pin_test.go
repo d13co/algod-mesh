@@ -1,13 +1,17 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/d13co/algod-mesh/internal/adapters/logging"
 	"github.com/d13co/algod-mesh/internal/domain"
 )
 
@@ -100,11 +104,23 @@ func TestPinnedRequestNeedsTheAdminToken(t *testing.T) {
 	}
 }
 
-// With auth off, as /mesh is open, anyone may pin.
+// With auth off nobody may pin, though /mesh is open: a pin reaches
+// externals and excluded nodes, which an open agent must not hand out.
 func TestPinnedRequestWithAuthOff(t *testing.T) {
 	h := newTwoPeerHarness(t, false)
-	if rec := h.pinnedGet("/v2/status", "", "c"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "c" {
-		t.Fatalf("auth off: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
+	for _, id := range []string{"c", "ext"} {
+		if rec := h.pinnedGet("/v2/status", "", id); rec.Code != 403 || !strings.Contains(rec.Body.String(), "none is configured") {
+			t.Fatalf("auth off, pinned to %s: %d %s", id, rec.Code, rec.Body.String())
+		}
+	}
+	if c, e := h.c.Hits("/v2/status"), h.ext.Hits("/v2/status"); c+e != 0 {
+		t.Fatalf("forwarded: c=%d ext=%d", c, e)
+	}
+	// Routing itself is open as before.
+	rec := httptest.NewRecorder()
+	h.r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("routed request with auth off: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -156,8 +172,10 @@ func TestPinnedThrottleIsPassedThrough(t *testing.T) {
 func TestPinnedRequestGetsAWithheldAnswer(t *testing.T) {
 	f := ttHeaderFleet(t)
 	f.b.SetOmitTTRound(true)
+	f.r.opts.AdminToken = "admin-token"
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, pastAccount+"?round=50", nil)
+	req.Header.Set("X-Algo-API-Token", "admin-token")
 	req.Header.Set("X-Algod-Mesh-Upstream", "b")
 	f.r.ServeHTTP(rec, req)
 	if rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "b" || rec.Header().Get(domain.TTRoundHeader) != "" {
@@ -215,8 +233,13 @@ func TestPinnedBroadcastGoesToOneNode(t *testing.T) {
 	if b, c, e := h.n.Hits("/v2/transactions"), h.c.Hits("/v2/transactions"), h.ext.Hits("/v2/transactions"); b != 0 || c != 1 || e != 0 {
 		t.Fatalf("write sent to b=%d c=%d ext=%d, want c only", b, c, e)
 	}
-	if id, want := txIDFrom(rec.Body.Bytes()), directTxID(t, h.c, "txnbytes"); id == "" || id != want {
+	id, want := txIDFrom(rec.Body.Bytes()), directTxID(t, h.c, "txnbytes")
+	if id == "" || id != want {
 		t.Fatalf("body not forwarded intact: got id %q want %q", id, want)
+	}
+	// Pending lookups for it go where it was sent.
+	if up, ok := h.r.recallTxn(id); !ok || up != "c" {
+		t.Fatalf("broadcast remembered at %q (%v), want c", up, ok)
 	}
 }
 
@@ -288,5 +311,61 @@ func TestPreflightAllowsTheUpstreamHeader(t *testing.T) {
 	h.r.ServeHTTP(rec, req)
 	if got := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "X-Algod-Mesh-Upstream") {
 		t.Fatalf("Access-Control-Allow-Headers %q", got)
+	}
+}
+
+// A pinned request in flight is not counted as load on the node: routing
+// must not steer clients away from a node an admin is looking at.
+func TestPinnedRequestInFlightIsNotLoad(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, withTokens)
+	h.c.SetHang(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest(http.MethodGet, "/v2/status", nil).WithContext(ctx)
+		req.Header.Set("X-Algo-API-Token", "admin-token")
+		req.Header.Set("X-Algod-Mesh-Upstream", "c")
+		h.r.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	waitFor(t, 2*time.Second, func() bool { return h.c.Hits("/v2/status") > 0 })
+	n := pinnedStats(t, h.harness, "c").Inflight
+	cancel()
+	<-done
+	if n != 0 {
+		t.Fatalf("pinned request counted as %d in flight on c", n)
+	}
+}
+
+// A pinned wait for a block may take as long as algod holds it, past the
+// bound on an attempt; any other pinned request may not.
+func TestPinnedWaitOutlastsTheAttemptBound(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, func(o *RouterOptions) { withTokens(o); o.UpstreamTimeout = 100 * time.Millisecond })
+	h.c.SetLatency(300 * time.Millisecond)
+	if rec := h.pinnedGet("/v2/status/wait-for-block-after/5", "admin-token", "c"); rec.Code != 200 || rec.Header().Get("X-Algod-Mesh-Upstream") != "c" {
+		t.Fatalf("pinned wait: %d %s %s", rec.Code, rec.Header().Get("X-Algod-Mesh-Upstream"), rec.Body.String())
+	}
+	if rec := h.pinnedGet("/v2/status", "admin-token", "c"); rec.Code != 504 {
+		t.Fatalf("pinned status past the attempt bound: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The access log marks a pinned request, so that one sent to an excluded
+// node does not read as a routing decision.
+func TestPinnedRequestIsMarkedInTheLog(t *testing.T) {
+	h := newTwoPeerHarnessOpts(t, nil, withTokens)
+	var buf bytes.Buffer
+	h.r.log = logging.New(&buf, slog.LevelInfo, false)
+	h.pinnedGet("/v2/status", "admin-token", "c")
+	if line := buf.String(); !strings.Contains(line, "pinned=true") || !strings.Contains(line, "upstream=c") {
+		t.Fatalf("access log: %s", line)
+	}
+	buf.Reset()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v2/status", nil)
+	req.Header.Set("X-Algo-API-Token", "admin-token")
+	h.r.ServeHTTP(rec, req)
+	if strings.Contains(buf.String(), "pinned") {
+		t.Fatalf("routed request marked pinned: %s", buf.String())
 	}
 }
