@@ -57,6 +57,13 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 			t.Fatalf("excluding the local node by its default id (hostname) must fail: %v", err)
 		}
 	}
+	// An external's name is its upstream id, and an id names one upstream.
+	if _, err := load(t, "local: {id: a, data_dir: /x}\ntiers: {external: [{name: e, url: x}, {name: e, url: y}]}\n"); err == nil || !strings.Contains(err.Error(), "used twice") {
+		t.Fatalf("two externals with one name must fail: %v", err)
+	}
+	if _, err := load(t, "local: {id: a, data_dir: /x}\ntiers: {external: [{name: a, url: x}]}\n"); err == nil || !strings.Contains(err.Error(), "local.id") {
+		t.Fatalf("an external named as the local node must fail: %v", err)
+	}
 	if _, err := load(t, "local: {id: a, data_dir: /x}\nunknown_key: 1\n"); err == nil {
 		t.Fatal("unknown keys must fail")
 	}

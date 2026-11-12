@@ -38,6 +38,23 @@ func TestForwardStreamsAndSetsToken(t *testing.T) {
 	}
 }
 
+// The pin header is the router's: no backend sees it.
+func TestForwardDropsTheUpstreamHeader(t *testing.T) {
+	var got []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Values("X-Algod-Mesh-Upstream")
+	}))
+	defer up.Close()
+	req := httptest.NewRequest("GET", "/v2/status", nil)
+	req.Header.Set("X-Algod-Mesh-Upstream", "b")
+	if out := New(nil).Forward(httptest.NewRecorder(), req, ports.Target{BaseURL: up.URL}); out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("forwarded %q", got)
+	}
+}
+
 func TestForwardRetryableStatusIsNotStreamed(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
@@ -65,6 +82,24 @@ func TestForwardRetryableStatusIsNotStreamed(t *testing.T) {
 	out = f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up404.URL})
 	if out.Status != 404 || !out.HeadersSent || rec.Code != 404 {
 		t.Fatalf("plain 404 must stream: %+v", out)
+	}
+}
+
+// PassAll streams whatever the forwarder or the target would withhold.
+func TestForwardPassAllStreamsEveryStatus(t *testing.T) {
+	for _, code := range []int{404, 500, 503} {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+			w.Write([]byte("node says"))
+		}))
+		f := New(nil)
+		f.RetryableStatus[500] = true
+		rec := httptest.NewRecorder()
+		out := f.Forward(rec, httptest.NewRequest("GET", "/x", nil), ports.Target{BaseURL: up.URL, RetryStatus: map[int]bool{404: true}, PassAll: true})
+		up.Close()
+		if out.Status != code || !out.HeadersSent || rec.Code != code || rec.Body.String() != "node says" {
+			t.Fatalf("%d: outcome %+v, client got %d %q", code, out, rec.Code, rec.Body.String())
+		}
 	}
 }
 

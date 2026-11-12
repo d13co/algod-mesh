@@ -150,6 +150,9 @@ type Target struct {
 	// otherwise withheld: dtalgorand's 504 for a simulation that ran out of
 	// time, which would run as long on the next node.
 	PassStatus map[int]bool
+	// PassAll streams every answer to the client as it was sent, whatever
+	// its status: the one upstream an admin pinned a request to.
+	PassAll bool
 	// OnResponse, when set, sees each upstream answer that Check let through,
 	// with its status and headers, before anything is copied to the client,
 	// and may change the headers: the rate limiter reads and strips a node's

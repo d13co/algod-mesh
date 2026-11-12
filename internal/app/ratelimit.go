@@ -84,6 +84,7 @@ func (o *LimiterOptions) defaults() {
 // Identity is who a request is billed to.
 type Identity struct {
 	Exempt bool   // the admin token, health probes, the agent's own reads
+	Admin  bool   // the request carries the admin token
 	Key    string // "token:<name>" or "ip:<address or IPv6 prefix>"
 	Plan   string
 }
