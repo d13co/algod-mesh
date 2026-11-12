@@ -72,8 +72,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download "$GITHUB_REF_NAME" -D dist -p '*.deb' -p checksums.txt
-          cd dist && sha256sum -c --ignore-missing checksums.txt
+          # Exactly the .debs checksums.txt lists: sha256sum -c skips a file it doesn't list,
+          # so a .deb attached to the release by hand would otherwise be signed into apt unchecked.
+          gh release download "$GITHUB_REF_NAME" -D dist -p checksums.txt
+          cd dist
+          : > debs.sha256
+          while read -r sum name; do
+            f=${name#./}
+            case "$f" in
+              *[!A-Za-z0-9._+~-]* | "") echo "unexpected name in checksums.txt: $name"; exit 1 ;;
+              algod-mesh_*.deb) ;;
+              *) continue ;; # the binaries
+            esac
+            # </dev/null: gh must not read the rest of checksums.txt off the loop's stdin
+            gh release download "$GITHUB_REF_NAME" -p "$f" </dev/null
+            echo "$sum  $f" >> debs.sha256
+          done < checksums.txt
+          # One per arch. By glob, not the tag: nfpm names v1.2.3-rc1's .deb 1.2.3~rc1.
+          for a in amd64 arm64; do
+            set -- algod-mesh_*_$a.deb
+            [ -f "$1" ] || set -- # no match leaves the pattern itself
+            [ $# -eq 1 ] || { echo "checksums.txt lists $# .debs for $a, not one: $*"; exit 1; }
+          done
+          sha256sum -c debs.sha256
+          rm debs.sha256
       - name: Import the signing subkey
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
@@ -89,8 +111,18 @@ jobs:
           GPG_PASSPHRASE_FILE=$RUNNER_TEMP/pass APT_REPO=$RUNNER_TEMP/apt .github/apt-publish.sh dist/*.deb
       - name: Check apt.d13.co lists the release
         run: |
-          v=${GITHUB_REF_NAME#v}
-          for a in amd64 arm64; do
-            curl -fsS https://apt.d13.co/dists/stable/main/binary-$a/Packages?v=$v |
-              grep -qx "Filename: pool/algod-mesh_${v}_$a.deb" || { echo "no $v for $a"; exit 1; }
+          # each .deb published above, with the release's bytes
+          for f in dist/*.deb; do
+            v=$(dpkg-deb -f "$f" Version)
+            a=$(dpkg-deb -f "$f" Architecture)
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            # the query string skips a cached copy from before this publish
+            got=$(curl -fsS "https://apt.d13.co/dists/stable/main/binary-$a/Packages?sha256=$sha" |
+              awk -v fn="Filename: pool/algod-mesh_${v}_$a.deb" '
+                BEGIN { RS = "" }
+                { f = 0; s = ""; n = split($0, l, "\n")
+                  for (i = 1; i <= n; i++) { if (l[i] == fn) f = 1; if (l[i] ~ /^SHA256: /) s = substr(l[i], 9) }
+                  if (f) print s }')
+            [ -n "$got" ] || { echo "no $v for $a"; exit 1; }
+            [ "$got" = "$sha" ] || { echo "apt.d13.co lists $v for $a with SHA256 $got, the release's is $sha"; exit 1; }
           done
