@@ -263,7 +263,9 @@ func (r *Router) authorize(w http.ResponseWriter, req *http.Request, class domai
 	tok := req.Header.Get("X-Algo-API-Token")
 	exempt := Identity{Exempt: true}
 	switch {
-	case r.isAdmin(req), isHealth(req, class):
+	case r.isAdmin(req):
+		return Identity{Exempt: true, Admin: true}, true
+	case isHealth(req, class):
 		return exempt, true
 	case class.Agent && r.opts.AdminToken == "" && r.opts.ClientToken == "" && r.limiter == nil:
 		return exempt, true // auth is off; a rate-limited endpoint is public, so /mesh never is
@@ -311,14 +313,7 @@ func (r *Router) servePinned(w http.ResponseWriter, req *http.Request, class dom
 	if sw, ok := w.(*statusWriter); ok {
 		sw.pinned = true
 	}
-	cands, _ := r.dir.Snapshot()
-	var u domain.Upstream
-	n := 0
-	for _, c := range cands {
-		if c.ID == id {
-			u, n = c, n+1
-		}
-	}
+	u, n := r.dir.Upstream(id)
 	switch {
 	case n == 0:
 		writeMessage(w, 400, fmt.Sprintf("algod-mesh: unknown upstream %q", id))
@@ -337,13 +332,9 @@ func (r *Router) servePinned(w http.ResponseWriter, req *http.Request, class dom
 	if class.Broadcast {
 		// Where the transaction went, for the pending lookups that follow:
 		// the node may be one that does not pass it on to the mesh.
-		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
+		cw, remember := r.captureTxn(w)
 		w = cw
-		defer func() {
-			if cw.status == 200 {
-				r.rememberTxn(txIDFrom(cw.buf.Bytes()), u.ID)
-			}
-		}()
+		defer remember(u.ID)
 	}
 	if out := r.forwardPinned(w, req, u, class); out.Failed() && !out.HeadersSent {
 		r.answerFailure(w, req, class, out)
@@ -356,21 +347,36 @@ func (r *Router) servePinned(w http.ResponseWriter, req *http.Request, class dom
 // would count as a failure), and not its time in flight, which would steer
 // routed requests away from a node an admin is looking at.
 func (r *Router) forwardPinned(w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass) ports.Outcome {
-	w.Header().Set(upstreamHeader, u.ID)
-	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(u.Tier))
-	// One attempt, bounded as a request and as an attempt are.
-	bound := min(r.opts.RequestTimeout, r.opts.UpstreamTimeout)
-	if class.WaitAfter != nil {
-		// algod holds the request for up to its own timeout before it
-		// answers with its current status: that answer must arrive.
-		bound = max(bound, pinnedWaitTimeout)
-	}
-	ctx, cancel := context.WithTimeout(req.Context(), bound)
+	markUpstream(w, u)
+	ctx, cancel := context.WithTimeout(req.Context(), r.pinnedTimeout(class))
 	defer cancel()
 	out := r.fwd.Forward(w, req.WithContext(ctx), ports.Target{BaseURL: u.BaseURL, Token: u.Token, PassAll: true})
+	r.recordAttempt(u, class, out)
+	return out
+}
+
+// pinnedTimeout bounds a pinned request's one attempt as a request and as an
+// attempt are. A wait-for-block-after is held by algod for up to its own
+// timeout before it answers with its current status, and that answer must
+// arrive: it gets pinnedWaitTimeout, or UpstreamTimeout if longer, as an
+// attempt at a node does.
+func (r *Router) pinnedTimeout(class domain.RequestClass) time.Duration {
+	if class.WaitAfter != nil {
+		return max(r.opts.UpstreamTimeout, pinnedWaitTimeout)
+	}
+	return min(r.opts.RequestTimeout, r.opts.UpstreamTimeout)
+}
+
+// markUpstream names the upstream that answers, and its tier, on the response.
+func markUpstream(w http.ResponseWriter, u domain.Upstream) {
+	w.Header().Set(upstreamHeader, u.ID)
+	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(u.Tier))
+}
+
+// recordAttempt counts one forwarded attempt at u, and its latency.
+func (r *Router) recordAttempt(u domain.Upstream, class domain.RequestClass, out ports.Outcome) {
 	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
 	r.metric.Observe("mesh_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
-	return out
 }
 
 func tokenEqual(got, want string) bool {
@@ -412,7 +418,7 @@ func (r *Router) serve(w http.ResponseWriter, req *http.Request, class domain.Re
 		return
 	}
 	if pin := req.Header.Get(upstreamHeader); pin != "" {
-		if !r.isAdmin(req) {
+		if !id.Admin {
 			r.metric.Inc("mesh_requests_unauthorized")
 			msg := "algod-mesh: " + upstreamHeader + " needs the admin token"
 			if r.opts.AdminToken == "" {
@@ -548,8 +554,7 @@ func (r *Router) pick(ctx context.Context, class domain.RequestClass, cands []do
 // on the request as a whole; the client's own context stays on req, so that
 // its departure is told apart from the request's deadline.
 func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.Request, u domain.Upstream, class domain.RequestClass, retry map[int]bool) ports.Outcome {
-	w.Header().Set(upstreamHeader, u.ID)
-	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(u.Tier))
+	markUpstream(w, u)
 	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
@@ -636,8 +641,7 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		}
 		rr.ids = nil
 	}
-	r.metric.Inc("mesh_upstream_requests", "upstream", u.ID, "class", class.StatKey(), "failed", boolStr(out.Failed()))
-	r.metric.Observe("mesh_upstream_latency_ms", float64(out.Duration)/float64(time.Millisecond), "upstream", u.ID, "class", class.StatKey())
+	r.recordAttempt(u, class, out)
 	return out
 }
 
@@ -1306,8 +1310,7 @@ func (r *Router) handleWait(w http.ResponseWriter, req *http.Request, class doma
 			return
 		}
 		_ = err // on timeout algod itself answers with the current status; so do we
-		w.Header().Set(upstreamHeader, local.ID)
-		w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(local.Tier))
+		markUpstream(w, local)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		_, _ = w.Write(body)
@@ -1368,8 +1371,7 @@ func (r *Router) handlePeerWait(w http.ResponseWriter, req *http.Request, class 
 		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	w.Header().Set(upstreamHeader, f.upstream.ID)
-	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
+	markUpstream(w, f.upstream)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(f.body)
@@ -1411,8 +1413,7 @@ func (r *Router) handleBalancerWait(w http.ResponseWriter, req *http.Request, cl
 		r.forwardNow(w, req, class, cands, best)
 		return
 	}
-	w.Header().Set(upstreamHeader, f.upstream.ID)
-	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(f.upstream.Tier))
+	markUpstream(w, f.upstream)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	_, _ = w.Write(f.body)
@@ -1526,6 +1527,18 @@ func (r *Router) getStatus(ctx context.Context, u domain.Upstream, class domain.
 	return st.LastRound, body, nil
 }
 
+// captureTxn wraps a broadcast's response writer to read the transaction id
+// off its answer. remember records the upstream the transaction went to, if
+// the answer was a 200; it is called once the answer is written.
+func (r *Router) captureTxn(w http.ResponseWriter) (cw *captureWriter, remember func(upstream string)) {
+	cw = &captureWriter{ResponseWriter: w, limit: 8 << 10}
+	return cw, func(upstream string) {
+		if cw.status == 200 {
+			r.rememberTxn(txIDFrom(cw.buf.Bytes()), upstream)
+		}
+	}
+}
+
 func (r *Router) rememberTxn(txid, upstream string) {
 	r.pins.remember(txid, upstream, r.clock.Now())
 }
@@ -1545,11 +1558,9 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 		return
 	}
 	if !r.opts.MultiBroadcast {
-		cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
+		cw, remember := r.captureTxn(w)
 		r.forwardSelected(ctx, cw, req, class, sel)
-		if cw.status == 200 {
-			r.rememberTxn(txIDFrom(cw.buf.Bytes()), cw.Header().Get(upstreamHeader))
-		}
+		remember(cw.Header().Get(upstreamHeader))
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(req.Body, 4<<20))
@@ -1589,12 +1600,10 @@ func (r *Router) handleBroadcast(ctx context.Context, w http.ResponseWriter, req
 			r.metric.Inc("mesh_retries")
 			r.log.Debug("retrying on external", "path", req.URL.Path, "external", ext.ID)
 			req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
-			cw := &captureWriter{ResponseWriter: w, limit: 8 << 10}
+			cw, remember := r.captureTxn(w)
 			out := r.forward(ctx, cw, req, ext, class, nil)
 			if !out.Failed() || out.HeadersSent || req.Context().Err() != nil {
-				if cw.status == 200 {
-					r.rememberTxn(txIDFrom(cw.buf.Bytes()), ext.ID)
-				}
+				remember(ext.ID)
 				return
 			}
 		}
@@ -1700,8 +1709,7 @@ func writeFan(w http.ResponseWriter, res fanResult) {
 	if res.resp.StatusCode == http.StatusTooManyRequests {
 		// The node limits the mesh, not this client (see answerFailure).
 		out := ports.Outcome{Status: res.resp.StatusCode, RetryAfter: ports.ParseRetryAfter(res.resp.Header.Get("Retry-After"), time.Now())}
-		w.Header().Set(upstreamHeader, res.u.ID)
-		w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(res.u.Tier))
+		markUpstream(w, res.u)
 		w.Header().Set("Retry-After", strconv.FormatInt(ceilSeconds(throttleFor(out)), 10))
 		writeMessage(w, 503, throttledTriedMessage)
 		return
@@ -1714,8 +1722,7 @@ func writeFan(w http.ResponseWriter, res fanResult) {
 		}
 		w.Header()[k] = vs
 	}
-	w.Header().Set(upstreamHeader, res.u.ID)
-	w.Header().Set("X-Algod-Mesh-Tier", fmt.Sprint(res.u.Tier))
+	markUpstream(w, res.u)
 	w.WriteHeader(res.resp.StatusCode)
 	_, _ = w.Write(res.body)
 }

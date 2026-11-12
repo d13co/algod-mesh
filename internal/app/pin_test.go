@@ -369,3 +369,26 @@ func TestPinnedRequestIsMarkedInTheLog(t *testing.T) {
 		t.Fatalf("routed request marked pinned: %s", buf.String())
 	}
 }
+
+// A pinned wait-for-block-after gets as long as algod holds it, or
+// upstream_timeout if longer, whatever request_timeout is; any other pinned
+// request gets one attempt within the request's bound.
+func TestPinnedTimeout(t *testing.T) {
+	round := uint64(5)
+	wait, status := domain.RequestClass{WaitAfter: &round}, domain.RequestClass{}
+	for _, tc := range []struct {
+		request, upstream, wait, other time.Duration
+	}{
+		{request: 30 * time.Second, upstream: 100 * time.Second, wait: 100 * time.Second, other: 30 * time.Second},
+		{request: 120 * time.Second, upstream: 60 * time.Second, wait: pinnedWaitTimeout, other: 60 * time.Second},
+		{request: 10 * time.Second, upstream: 20 * time.Second, wait: pinnedWaitTimeout, other: 10 * time.Second},
+	} {
+		r := &Router{opts: RouterOptions{RequestTimeout: tc.request, UpstreamTimeout: tc.upstream}}
+		if got := r.pinnedTimeout(wait); got != tc.wait {
+			t.Errorf("request %v upstream %v: wait bound %v, want %v", tc.request, tc.upstream, got, tc.wait)
+		}
+		if got := r.pinnedTimeout(status); got != tc.other {
+			t.Errorf("request %v upstream %v: status bound %v, want %v", tc.request, tc.upstream, got, tc.other)
+		}
+	}
+}
