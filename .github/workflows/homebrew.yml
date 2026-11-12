@@ -1,0 +1,64 @@
+name: homebrew
+
+# Check that the formula the release publishes to d13co/tap still installs on a
+# Mac and passes its test, without waiting for a release tag: the binaries are
+# built as the release builds them, and the formula points at them with file://
+# URLs. Only on the paths that make the formula, or the `algod-mesh version`
+# output its test checks.
+on:
+  pull_request:
+    paths:
+      - 'deploy/homebrew/**'
+      - 'cmd/algod-mesh/**'
+      - 'go.mod'
+      - 'Makefile'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/homebrew.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formula:
+    if: github.repository == 'd13co/algod-mesh'
+    runs-on: macos-15 # arm64
+    timeout-minutes: 20
+    env:
+      V: 0.0.0-check
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build the binaries
+        run: |
+          d=$RUNNER_TEMP/release/v$V
+          mkdir -p "$d"
+          # all four, as the release does: render.sh needs a checksum for each
+          for os in darwin linux; do
+            for arch in arm64 amd64; do
+              GOOS=$os GOARCH=$arch VERSION=v$V make build
+              cp bin/algod-mesh "$d/algod-mesh-$os-$arch"
+            done
+          done
+          cd "$d" && shasum -a 256 algod-mesh-* > checksums.txt && cat checksums.txt
+      - name: Install with Homebrew
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          d=$RUNNER_TEMP/release/v$V
+          brew tap-new --no-git d13co/local
+          deploy/homebrew/render.sh "$V" "file://$d" "$d/checksums.txt" \
+            > "$(brew --repository d13co/local)/Formula/algod-mesh.rb"
+          brew install --formula d13co/local/algod-mesh
+          brew test d13co/local/algod-mesh
+          [ "$(algod-mesh version)" = "algod-mesh v$V" ]
+          ls -d "$(brew --prefix)/var/algod-mesh" # post_install ran

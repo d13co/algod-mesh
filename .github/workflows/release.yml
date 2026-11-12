@@ -1,9 +1,10 @@
 name: release
 
 # Version tags (v1.2.3) publish a release with the linux amd64 and arm64
-# binaries (which install.sh downloads) and .debs, move the stable branch to
-# the tagged commit, so that the scripts install.sh fetches from stable match
-# the released binary, and publish the .debs to https://apt.d13.co.
+# binaries (which install.sh downloads) and .debs, and the darwin ones, move the
+# stable branch to the tagged commit, so that the scripts install.sh fetches
+# from stable match the released binary, publish the .debs to
+# https://apt.d13.co, and point the d13co/tap Homebrew formula at the binaries.
 on:
   push:
     tags: ["v*"]
@@ -30,22 +31,29 @@ jobs:
       - run: make lint
       - run: make test
       - run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-      # amd64 last: the version check below runs bin/algod-mesh.
+      # linux amd64 last: the version check below runs bin/algod-mesh.
       - name: Build the binaries and .debs
-        env:
-          GOOS: linux
         run: |
           mkdir -p dist
+          # static (CGO_ENABLED=0), so the Homebrew formula's darwin binaries cross-compile here
           for arch in arm64 amd64; do
-            GOARCH=$arch make build
+            GOOS=darwin GOARCH=$arch make build
+            cp bin/algod-mesh dist/algod-mesh-darwin-$arch
+          done
+          for arch in arm64 amd64; do
+            GOOS=linux GOARCH=$arch make build
             cp bin/algod-mesh dist/algod-mesh-linux-$arch
             DEB_VERSION=${GITHUB_REF_NAME#v} ARCH=$arch nfpm pkg -p deb -t dist/
           done
-          cd dist && sha256sum algod-mesh-linux-* *.deb > checksums.txt
+          cd dist && sha256sum algod-mesh-linux-* algod-mesh-darwin-* *.deb > checksums.txt
       - name: Check the version is stamped
         run: |
           v=$(./bin/algod-mesh version | awk '{print $2}')
           [ "$v" = "${GITHUB_REF_NAME}" ] || { echo "binary says $v, tag is $GITHUB_REF_NAME"; exit 1; }
+          # the darwin binaries don't run here; -X put the tag among their strings
+          for f in dist/algod-mesh-darwin-*; do
+            grep -qaF "$GITHUB_REF_NAME" "$f" || { echo "$f doesn't hold $GITHUB_REF_NAME"; exit 1; }
+          done
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,3 +134,70 @@ jobs:
             [ -n "$got" ] || { echo "no $v for $a"; exit 1; }
             [ "$got" = "$sha" ] || { echo "apt.d13.co lists $v for $a with SHA256 $got, the release's is $sha"; exit 1; }
           done
+
+  # Separate from release so a failed publish can be re-run on its own.
+  homebrew:
+    needs: release
+    environment: homebrew # holds the tap's deploy key; v* tags only, needs approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # the release's checksums; the tap is pushed with its deploy key
+    steps:
+      # Without it the tap checkout gets a read-only token and the push below fails five times, slowly.
+      - name: Check the tap's deploy key is set
+        env:
+          KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: '[ -n "$KEY" ] || { echo "HOMEBREW_TAP_DEPLOY_KEY is not set in the homebrew environment"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download the binaries the formula points at
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" -D dist -p checksums.txt
+          # from the public URLs the formula uses, so a bad URL fails here, not in brew install
+          url=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME
+          for a in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+            curl -fsSL "$url/algod-mesh-$a" -o "dist/algod-mesh-$a"
+          done
+          cd dist && sha256sum -c --ignore-missing checksums.txt
+      - uses: actions/checkout@v4
+        with:
+          repository: d13co/homebrew-tap
+          path: tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }} # write access to the tap only
+      - name: Update the formula
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          # sort -V below puts 1.2.3-rc1 after 1.2.3, so an rc in the tap would hold off 1.2.3
+          case $v in *-*) echo "$v is a prerelease; the tap gets releases only"; exit 0 ;; esac
+          url=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME
+          cd tap
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          # No concurrency group: GitHub would cancel a pending run when another queues, and
+          # that tag's formula would never land. Runs that overlap instead retry on a rejected push.
+          for attempt in 1 2 3 4 5; do
+            if [ "$attempt" -gt 1 ]; then
+              sleep $((attempt * 5))
+              git fetch --depth 1 origin "$branch"
+              git reset --hard FETCH_HEAD
+            fi
+            mkdir -p Formula
+            # an older tag's run, approved after a newer one's, leaves the formula alone
+            cur=$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/algod-mesh.rb 2>/dev/null || true)
+            if [ -n "$cur" ] && [ "$cur" != "$v" ] && [ "$(printf '%s\n' "$cur" "$v" | sort -V | tail -n 1)" = "$cur" ]; then
+              echo "the formula is at $cur, newer than $v"; exit 0
+            fi
+            ../deploy/homebrew/render.sh "$v" "$url" ../dist/checksums.txt > Formula/algod-mesh.rb
+            ruby -c Formula/algod-mesh.rb >/dev/null
+            git add Formula/algod-mesh.rb
+            if git diff --cached --quiet; then echo "the formula is already at $v"; exit 0; fi
+            git commit -m "algod-mesh $v"
+            if git push origin "HEAD:$branch"; then exit 0; fi
+            echo "the tap moved under this run (attempt $attempt); retrying"
+          done
+          exit 1
