@@ -3,11 +3,14 @@ name: homebrew
 # Check that the formula the release publishes to d13co/tap still installs on a
 # Mac and passes its test, without waiting for a release tag: the binaries are
 # built as the release builds them, and the formula points at them with file://
-# URLs. Only on the paths that make the formula.
+# URLs. Only on the paths that make the formula, or the `algod-mesh version`
+# output its test checks.
 on:
   pull_request:
     paths:
       - 'deploy/homebrew/**'
+      - 'cmd/algod-mesh/**'
+      - 'go.mod'
       - 'Makefile'
       - '.github/workflows/release.yml'
       - '.github/workflows/homebrew.yml'

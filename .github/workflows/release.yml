@@ -110,6 +110,11 @@ jobs:
     permissions:
       contents: read # the release's checksums; the tap is pushed with its deploy key
     steps:
+      # Without it the tap checkout gets a read-only token and the push below fails five times, slowly.
+      - name: Check the tap's deploy key is set
+        env:
+          KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: '[ -n "$KEY" ] || { echo "HOMEBREW_TAP_DEPLOY_KEY is not set in the homebrew environment"; exit 1; }'
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
