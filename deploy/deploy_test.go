@@ -13,6 +13,7 @@ import (
 	"github.com/algorand/go-algorand-sdk/v2/types"
 
 	"github.com/d13co/algod-mesh/internal/config"
+	"github.com/d13co/algod-mesh/internal/domain"
 )
 
 // The examples must keep up with the config schema: every key known, and
@@ -119,7 +120,11 @@ func TestAutoconfigNodely(t *testing.T) {
 		c := autoconfigGenesis(t, t.TempDir(), tc.genesis, "", bundle, tc.arg)
 		got := ""
 		if len(c.Tiers.External) == 1 {
-			got = c.Tiers.External[0].URL
+			e := c.Tiers.External[0]
+			got = e.URL
+			if caps := e.Capabilities; caps == nil || caps.Archival == nil || caps.Archival.Kind != domain.ArchivalFull || caps.TimeTravel == nil || !*caps.TimeTravel {
+				t.Errorf("%s %s: nodely capabilities %+v, want full archival and time travel", tc.genesis, tc.arg, caps)
+			}
 		}
 		if got != tc.url || len(c.Tiers.External) > 1 {
 			t.Errorf("%s %s: externals %+v, want url %q", tc.genesis, tc.arg, c.Tiers.External, tc.url)

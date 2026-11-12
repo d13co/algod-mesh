@@ -218,7 +218,7 @@ The bundle contains the sync key. Anyone who has it can read every node's algod 
 - **addresses**: every `10.112.*`/`10.114.*` interface, else a public one (`--address`). Clients and gossip are served on all of them and peers are told about all of them.
 - **ports**: 4000/tcp for clients and 4001/udp for gossip, or the next free pair if [other agents](#several-algods-on-one-host) run on the host (`--client-port`, `--mesh-port`)
 - **algod pass-through**: algod is advertised on every mesh address. Algod binds the address in `algod.net`, and the agent binds the rest and passes them through (see [multi-homed hosts](#multi-homed-hosts)).
-- **external fallback**: it asks whether to add Nodely for the node's network (`--nodely`/`--no-nodely`)
+- **external fallback**: it asks whether to add Nodely for the node's network (`--nodely`/`--no-nodely`), declared archival and time travel
 - **routing tier**: 1 (`--tier`)
 
 To install a config you wrote yourself, use `--config FILE`. To start from the fully commented example, run `algod-mesh config example -o FILE`.
@@ -420,10 +420,10 @@ With `ratelimit.enabled`, the agent limits each client by its own allowance. Thi
 
 ```
   app ──► agent :4000 ──► algod (local)
-                    └───► Nodely  (when algod is down, catching up, or the request needs archival data)
+                    └───► Nodely  (when algod is down, catching up, or the request needs archival data or time travel)
 ```
 
-This is the smallest useful setup: a single host, no peers and a static registry with no entries, plus one external tier. Your app gets transparent failover during algod restarts and catchup, and archival queries go to Nodely when your node is non-archival.
+This is the smallest useful setup: a single host, no peers and a static registry with no entries, plus one external tier. Your app gets transparent failover during algod restarts and catchup, and archival and time-travel queries go to Nodely when your node can't serve them.
 
 ### 2. Sidecar fleet (fallback mode)
 

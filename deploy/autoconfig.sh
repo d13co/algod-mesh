@@ -548,7 +548,7 @@ tiers:
   external:
     - name: nodely
       url: $nodely_url
-      capabilities: { archival: { kind: full } }
+      capabilities: { archival: { kind: full }, time_travel: true }
 EOF
 }
 
