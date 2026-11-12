@@ -84,12 +84,15 @@ jobs:
               algod-mesh_*.deb) ;;
               *) continue ;; # the binaries
             esac
-            gh release download "$GITHUB_REF_NAME" -p "$f"
+            # </dev/null: gh must not read the rest of checksums.txt off the loop's stdin
+            gh release download "$GITHUB_REF_NAME" -p "$f" </dev/null
             echo "$sum  $f" >> debs.sha256
           done < checksums.txt
-          v=${GITHUB_REF_NAME#v}
+          # One per arch. By glob, not the tag: nfpm names v1.2.3-rc1's .deb 1.2.3~rc1.
           for a in amd64 arm64; do
-            [ -f "algod-mesh_${v}_$a.deb" ] || { echo "checksums.txt lists no $v .deb for $a"; exit 1; }
+            set -- algod-mesh_*_$a.deb
+            [ -f "$1" ] || set -- # no match leaves the pattern itself
+            [ $# -eq 1 ] || { echo "checksums.txt lists $# .debs for $a, not one: $*"; exit 1; }
           done
           sha256sum -c debs.sha256
           rm debs.sha256
