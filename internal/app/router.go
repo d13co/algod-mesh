@@ -167,6 +167,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	sw := &statusWriter{ResponseWriter: w, origin: req.Header.Get("Origin") != ""}
 	// A closure, so the log sees the class as refineBody leaves it.
 	defer func() { r.logRequest(sw, req, class, start) }()
+	if class.Query {
+		class.EventStream = domain.AcceptsEventStream(req.Header.Values("Accept"))
+	}
 	if class.Evaluates() && !r.refineBody(req, &class) {
 		writeMessage(sw, http.StatusBadRequest, "algod-mesh: cannot read request body")
 		return
@@ -449,13 +452,23 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
+	// Also when the forwarder panics with http.ErrAbortHandler, as it does
+	// when an answer is cut while copied: a client that leaves a stream.
+	defer release()
 	target := ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry}
 	timeLimited := class.Evaluates() || class.Deltas || class.Versions || class.Holders
 	if timeLimited {
 		target.PassStatus = timeLimitPass
 	}
 	if t, ok := ctx.Value(ticketKey{}).(*Ticket); ok {
-		target.OnResponse = r.effortReader(t, u)
+		effort := r.effortReader(t, u)
+		target.OnResponse = func(_ int, h http.Header) { effort(h) }
+		target.OnTrailer = func(h http.Header) {
+			// The cost trailer is the mesh's own (Ticket.Done): one a node
+			// sends would go out ahead of it.
+			h.Del(costHeader)
+			effort(h)
+		}
 	}
 	switch {
 	case class.Boxes && class.Round != nil && u.ServesHistory():
@@ -538,12 +551,14 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 }
 
 // effortReader takes the work a node reports doing off its answer to a
-// billed client, and bills it to the client's ticket. Only mesh nodes are
-// believed: an external could bill clients anything. The client sees the
-// cost in credits, not the node's figures; an exempt client (the admin)
-// sees them as the node sent them.
-func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(int, http.Header) {
-	return func(_ int, h http.Header) {
+// billed client, its headers or, for a streamed query, which reports it
+// once the stream ends, its trailers, and bills it to the client's ticket.
+// Only mesh nodes are believed: an external could bill clients anything.
+// The client sees the cost in credits, not the node's figures; an exempt
+// client (the admin) sees them as the node sent them. A stream's end event
+// repeats the figures in its body, which the mesh passes as it is.
+func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(http.Header) {
+	return func(h http.Header) {
 		vs := h.Values(domain.EffortHeader)
 		if len(vs) == 0 {
 			return

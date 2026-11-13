@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -200,6 +201,13 @@ func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, err
 			MaxRounds         uint64 `json:"max-rounds"`
 			// Absent on a node from before it: 0, read as calls × rounds.
 			MaxTotalCalls uint64 `json:"max-total-calls"`
+			// Absent on a node from before time travel inside a call: none.
+			MaxSeekRounds    uint64   `json:"max-seek-rounds"`
+			MaxScanStepBytes uint64   `json:"max-scan-step-bytes"`
+			MaxCallScanBytes uint64   `json:"max-call-scan-bytes"`
+			Opcodes          []string `json:"opcodes"`
+			// Absent on a node that only answers in full.
+			Stream []string `json:"stream"`
 		} `json:"query"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -219,7 +227,9 @@ func (c *Client) Capabilities(ctx context.Context) (*ports.NodeCapabilities, err
 	}
 	if q := raw.Query; q != nil {
 		lim.Query = domain.QueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls,
+			MaxSeekRounds: q.MaxSeekRounds, MaxScanStepBytes: q.MaxScanStepBytes, MaxCallScanBytes: q.MaxCallScanBytes,
+			Opcodes: domain.ParseTTOpcodes(q.Opcodes), Stream: slices.Contains(q.Stream, "sse")}
 	}
 	return &ports.NodeCapabilities{TimeTravel: raw.TimeTravel, DeveloperAPI: raw.DeveloperAPI, Limits: lim}, nil
 }

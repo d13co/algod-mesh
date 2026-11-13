@@ -227,3 +227,84 @@ func TestForwardCheckGzip(t *testing.T) {
 		t.Fatalf("outcome %+v seen %q, client got %d %q", out, seen, rec.Code, rec.Body.Bytes())
 	}
 }
+
+// A stream of Server-Sent Events reaches the client as it is written, and
+// its trailers once it ends: OnTrailer takes what it wants first, whether
+// the node announced it or not, and the others pass, announced or not.
+func TestForwardStreamTrailers(t *testing.T) {
+	for _, announced := range []bool{true, false} {
+		release := make(chan struct{})
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			if announced {
+				w.Header().Set("Trailer", "X-Algod-Effort")
+			}
+			w.WriteHeader(200)
+			w.Write([]byte("event: start\ndata: {}\n\n"))
+			http.NewResponseController(w).Flush()
+			<-release
+			w.Write([]byte("event: end\ndata: {}\n\n"))
+			if announced {
+				w.Header().Set("X-Algod-Effort", "opcodes=7")
+			} else {
+				w.Header().Set(http.TrailerPrefix+"X-Algod-Effort", "opcodes=7")
+			}
+			w.Header().Set(http.TrailerPrefix+"X-Other", "kept")
+		}))
+		f := New(nil)
+		var taken string
+		mesh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			f.Forward(w, r, ports.Target{BaseURL: up.URL, OnTrailer: func(h http.Header) {
+				taken = h.Get("X-Algod-Effort")
+				h.Del("X-Algod-Effort")
+			}})
+		}))
+		resp, err := http.Get(mesh.URL + "/v2/query")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := resp.Trailer["X-Algod-Effort"]; ok {
+			t.Fatalf("announced %v: effort trailer announced to the client: %v", announced, resp.Trailer)
+		}
+		first := make([]byte, len("event: start\ndata: {}\n\n"))
+		if _, err := io.ReadFull(resp.Body, first); err != nil {
+			t.Fatalf("announced %v: first event before the stream ended: %v", announced, err)
+		}
+		close(release)
+		rest, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(rest) != "event: end\ndata: {}\n\n" {
+			t.Fatalf("announced %v: rest %q", announced, rest)
+		}
+		if taken != "opcodes=7" || resp.Trailer.Get("X-Algod-Effort") != "" || resp.Trailer.Get("X-Other") != "kept" {
+			t.Fatalf("announced %v: taken %q, client trailers %v", announced, taken, resp.Trailer)
+		}
+		mesh.Close()
+		up.Close()
+	}
+}
+
+// Without OnTrailer, trailers pass as the node announced them.
+func TestForwardTrailersPass(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", "X-Algod-Effort")
+		w.WriteHeader(200)
+		w.Write([]byte("x"))
+		w.Header().Set("X-Algod-Effort", "opcodes=7")
+	}))
+	defer up.Close()
+	f := New(nil)
+	mesh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.Forward(w, r, ports.Target{BaseURL: up.URL})
+	}))
+	defer mesh.Close()
+	resp, err := http.Get(mesh.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.Trailer.Get("X-Algod-Effort") != "opcodes=7" {
+		t.Fatalf("trailers %v", resp.Trailer)
+	}
+}

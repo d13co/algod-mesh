@@ -155,6 +155,12 @@ type Target struct {
 	// and may change the headers: the rate limiter reads and strips a node's
 	// effort.
 	OnResponse func(status int, h http.Header)
+	// OnTrailer, when set, sees the trailers of an answer the client gets,
+	// once the upstream's body has ended, and may remove some before they
+	// are copied: a streamed query reports its effort in one. The trailers
+	// are announced to the client only as they arrive. Not called for an
+	// answer without announced trailers.
+	OnTrailer func(trailer http.Header)
 	// Check, when set, sees each upstream answer first, with the
 	// message of a small error answer ("" for any other), before anything
 	// is copied to the client. False withholds the answer, as a failure the

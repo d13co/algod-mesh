@@ -179,6 +179,20 @@ type QueryLimits struct {
 	// duplicates counted). 0 is max_calls × max_rounds: a node from before
 	// the field, or an override that does not set it.
 	MaxTotalCalls uint64 `json:"max_total_calls,omitempty" yaml:"max_total_calls,omitempty"`
+	// MaxSeekRounds is the most rounds one call may move its reads to with
+	// tt_seek; 0: time travel inside a call is off, or a node from before it.
+	MaxSeekRounds uint64 `json:"max_seek_rounds,omitempty" yaml:"max_seek_rounds,omitempty"`
+	// MaxScanStepBytes and MaxCallScanBytes bound the history one search of
+	// a state key or box name prefix, and all of a call's searches, may read.
+	MaxScanStepBytes uint64 `json:"max_scan_step_bytes,omitempty" yaml:"max_scan_step_bytes,omitempty"`
+	MaxCallScanBytes uint64 `json:"max_call_scan_bytes,omitempty" yaml:"max_call_scan_bytes,omitempty"`
+	// Opcodes are the time-travel opcodes the node runs in query programs,
+	// the capabilities response's opcodes list as a set: a heartbeat
+	// carries a word where the names would take a fifth of a datagram.
+	Opcodes TTOpcodes `json:"tt_opcodes,omitempty" yaml:"tt_opcodes,omitempty"`
+	// Stream is a node that answers a query that accepts text/event-stream
+	// with Server-Sent Events (stream lists "sse"); without it, in full.
+	Stream bool `json:"sse,omitempty" yaml:"sse,omitempty"`
 }
 
 // StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod

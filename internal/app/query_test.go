@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -117,7 +118,7 @@ func TestQueryLimitsForFleet(t *testing.T) {
 	}
 	want := domain.FleetQueryLimits{MaxCalls: 64, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxRounds: 4,
 		MaxTotalCalls: 256}
-	if got.Query == nil || *got.Query != want {
+	if got.Query == nil || !reflect.DeepEqual(*got.Query, want) {
 		t.Fatalf("query limits %+v, want %+v", got.Query, want)
 	}
 }
