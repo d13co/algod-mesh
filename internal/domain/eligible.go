@@ -212,7 +212,13 @@ type FleetQueryLimits struct {
 	MaxCallStateBytes uint64 `json:"max-call-state-bytes"`
 	MaxResponseBytes  uint64 `json:"max-response-bytes"`
 	MaxRounds         uint64 `json:"max-rounds"`
+	MaxSeekRounds     uint64 `json:"max-seek-rounds"`
+	MaxScanStepBytes  uint64 `json:"max-scan-step-bytes"`
+	MaxCallScanBytes  uint64 `json:"max-call-scan-bytes"`
 	MaxTotalCalls     uint64 `json:"max-total-calls"`
+	// Opcodes and Stream are absent when empty, as a node leaves them out.
+	Opcodes []string `json:"opcodes,omitempty"`
+	Stream  []string `json:"stream,omitempty"`
 }
 
 // FleetCapabilities is GET /v2/capabilities answered for the fleet. Its
@@ -258,8 +264,15 @@ type FleetQueryLimits struct {
 // limits, compared in order: calls, rounds, call budget, time travel, then
 // its id. It is picked apart from the simulate limits, as a query is routed
 // apart from a simulation.
+//
+// Its time-travel opcodes and their limits come with it: the router does
+// not route by opcodes, taking every node with queries to have them. stream
+// lists "sse" when any eligible node streams: the router prefers such a node
+// for a request that accepts a stream, and any other answers it in full,
+// which such a client reads too.
 func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeout time.Duration) (FleetCapabilitiesReply, bool) {
 	var best, bestQuery *Upstream
+	var stream bool
 	var multiplier, timeLimit uint64
 	var timeTravel, developerAPI bool
 	plain := RequestClass{Simulate: true, Idempotent: true}
@@ -270,8 +283,11 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeo
 			timeTravel = timeTravel || c.TimeTravel
 			developerAPI = developerAPI || c.DeveloperAPI
 		}
-		if Eligible(*u, query, bestRound, tolerance) && (bestQuery == nil || queryLimitsAbove(*u, *bestQuery)) {
-			bestQuery = u
+		if Eligible(*u, query, bestRound, tolerance) {
+			if bestQuery == nil || queryLimitsAbove(*u, *bestQuery) {
+				bestQuery = u
+			}
+			stream = stream || u.Caps.QueryLimits().Stream
 		}
 		if !Eligible(*u, plain, bestRound, tolerance) {
 			continue
@@ -307,7 +323,11 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeo
 	if bestQuery != nil {
 		q := bestQuery.Caps.QueryLimits()
 		reply.Query = &FleetQueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls,
+			MaxSeekRounds: q.MaxSeekRounds, MaxScanStepBytes: q.MaxScanStepBytes, MaxCallScanBytes: q.MaxCallScanBytes, Opcodes: q.Opcodes.Names()}
+		if stream {
+			reply.Query.Stream = []string{"sse"}
+		}
 	}
 	return reply, true
 }

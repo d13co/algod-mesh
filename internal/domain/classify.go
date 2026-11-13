@@ -77,6 +77,11 @@ type RequestClass struct {
 	// relaxation, when no node in the fleet has them, so that algod answers
 	// with its 404 as it would alone.
 	QueryAnyNode bool
+	// EventStream marks a query that accepts text/event-stream, which a node
+	// with stream "sse" answers with Server-Sent Events as its calls log,
+	// and any other in full. Selection prefers the first; it never makes a
+	// node ineligible, since both answers are the client's.
+	EventStream bool
 	// RoundHigh is the latest round a simulate or query request's "rounds"
 	// lists: a node must have reached it too, while Round, the earliest, is
 	// the one its window must cover. 0 when the request names at most one
@@ -477,6 +482,9 @@ func (c RequestClass) String() string {
 	}
 	if c.QueryAnyNode {
 		parts = append(parts, "query_any_node")
+	}
+	if c.EventStream {
+		parts = append(parts, "event_stream")
 	}
 	if c.LocalOnly {
 		parts = append(parts, "local_only")
