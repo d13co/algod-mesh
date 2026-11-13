@@ -405,16 +405,25 @@ type Ticket struct {
 	cancel    context.CancelCauseFunc
 	cancelled bool
 	done      bool
+	// trailer is the answer's header of a streamed answer, whose cost goes
+	// out as a trailer once it ends (Responding, Done).
+	trailer http.Header
 }
 
 // Reported adds the work a mesh node reported doing for one attempt. The
 // request is then billed by its effort rather than its running time; the
 // meter still runs until the response, so that a client can be cut off
-// while the work goes on.
+// while the work goes on. A streamed answer reports it in a trailer, as it
+// ends: its cost is then final, so that a tick before Done neither bills it
+// by time nor cancels a stream that is over.
 func (t *Ticket) Reported(e domain.Effort) {
 	t.l.mu.Lock()
 	defer t.l.mu.Unlock()
 	t.effort, t.reported = t.effort.Add(e), true
+	if t.trailer != nil && !t.frozen {
+		t.settle(t.l.clock.Now())
+		t.frozen = true
+	}
 }
 
 // settle makes extra what the request costs beyond its base by now: the
@@ -441,6 +450,12 @@ func (t *Ticket) Track(cancel context.CancelCauseFunc) {
 // request is no longer cancelled. A busy answer (503 with Retry-After) that
 // no node reported effort for did no work: it costs no more than the
 // cheapest request. Responding adds the RateLimit headers and the cost to h.
+//
+// A streamed answer (a query's Server-Sent Events) starts before the work
+// is done: its meter runs, and the request may be cancelled, until it ends;
+// its cost, settled then by the effort the node reports in a trailer, or
+// else by the meter, goes out as a trailer (Done). Its RateLimit headers
+// are as the request starts.
 func (t *Ticket) Responding(status int, h http.Header) {
 	l := t.l
 	now := l.clock.Now()
@@ -448,6 +463,16 @@ func (t *Ticket) Responding(status int, h http.Header) {
 	defer l.mu.Unlock()
 	if status == http.StatusServiceUnavailable && h.Get("Retry-After") != "" && !t.reported && !t.refunded {
 		t.refund()
+	}
+	if status == http.StatusOK && domain.IsEventStream(h.Get("Content-Type")) && !t.frozen {
+		t.settle(now)
+		t.k.refill(now)
+		for k, vs := range t.k.header() {
+			h[k] = vs
+		}
+		h.Add("Trailer", costHeader)
+		t.trailer = h
+		return
 	}
 	t.settle(now)
 	t.frozen = true
@@ -469,6 +494,10 @@ func (t *Ticket) Done() {
 	}
 	t.done = true
 	t.settle(now)
+	t.frozen = true
+	if t.trailer != nil {
+		t.trailer.Set(costHeader, credits(t.base+t.extra))
+	}
 	delete(t.k.flights, t)
 	if !t.k.metering() {
 		delete(l.active, t.k)

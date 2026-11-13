@@ -487,6 +487,28 @@ func TestRateLimitBillsReportedEffort(t *testing.T) {
 	}
 }
 
+// A streamed answer's effort comes in a trailer as it ends: from then its
+// cost is the effort, and a tick before the request is done, though its
+// client is overdrawn by the meter, neither bills it by time nor cancels it.
+func TestRateLimitStreamEffortFinal(t *testing.T) {
+	fc := clock.NewFake(time.Unix(1000, 0))
+	rates := domain.EffortRates{OpcodesPerCredit: 1000}
+	l := NewLimiter(LimiterOptions{Plans: map[string]domain.Plan{"free": {Minute: perMinute(10)}}, AnonymousPlan: "free",
+		Weights: testWeights, SimulatePerSecond: 2, Effort: &rates}, fc, logging.Nop{}, metrics.New())
+	tk, _ := l.Admit(Identity{Key: "ip:x", Plan: "free"}, domain.Classify("POST", "/v2/query", ""), 0)
+	cancelled := false
+	tk.Track(func(error) { cancelled = true })
+	h := http.Header{"Content-Type": {domain.EventStreamType}}
+	tk.Responding(200, h)
+	fc.Advance(20 * time.Second) // 40 credits by the meter: overdrawn
+	tk.Reported(domain.Effort{Opcodes: 1000})
+	l.tick()
+	tk.Done()
+	if cancelled || h.Get(costHeader) != "2" {
+		t.Fatalf("cancelled %v, cost %q, want 1 + 1", cancelled, h.Get(costHeader))
+	}
+}
+
 // A slow history read keeps its key past a sweep, so that the work it
 // reports is billed to the same allowance, and owed in the meantime.
 func TestRateLimitSweepKeepsReadsInFlight(t *testing.T) {
@@ -594,7 +616,7 @@ func TestRateLimitEffortThroughRouter(t *testing.T) {
 		fc, logging.Nop{}, metrics.New())
 	tk, _ := l.Admit(Identity{Key: "ip:x", Plan: "free"}, domain.Classify("POST", "/v2/transactions/simulate", ""), 0)
 	h := http.Header{domain.EffortHeader: {effort}}
-	f.r.effortReader(tk, domain.Upstream{ID: "ext", Kind: domain.KindExternal})(200, h)
+	f.r.effortReader(tk, domain.Upstream{ID: "ext", Kind: domain.KindExternal})(h)
 	if h.Get(domain.EffortHeader) != "" || tk.reported {
 		t.Fatalf("external: header %q, reported %v", h.Get(domain.EffortHeader), tk.reported)
 	}
@@ -602,7 +624,7 @@ func TestRateLimitEffortThroughRouter(t *testing.T) {
 	// the client.
 	tk, _ = l.Admit(Identity{Key: "ip:y", Plan: "free"}, domain.Classify("POST", "/v2/transactions/simulate", ""), 0)
 	h = http.Header{domain.EffortHeader: {"opcodes=7, lookups=3", "history=0, scanned=0, response-bytes=0"}}
-	f.r.effortReader(tk, domain.Upstream{ID: "b", Kind: domain.KindPeer})(200, h)
+	f.r.effortReader(tk, domain.Upstream{ID: "b", Kind: domain.KindPeer})(h)
 	if len(h.Values(domain.EffortHeader)) != 0 || tk.effort != (domain.Effort{Opcodes: 7, Lookups: 3}) {
 		t.Fatalf("two lines: header %q, effort %+v", h.Values(domain.EffortHeader), tk.effort)
 	}

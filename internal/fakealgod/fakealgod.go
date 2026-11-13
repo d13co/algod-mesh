@@ -74,6 +74,7 @@ type Node struct {
 	pathRetry     map[string]int    // ... with this Retry-After, in seconds
 	pathMessage   map[string]string // ... and this message
 	effort        map[string]string // answers for these paths carry this X-Algod-Effort
+	streamTrailer http.Header       // further trailers a streamed answer sends
 	boxes         map[uint64]map[string][]byte
 	pool          map[string]poolTxn
 	hits          map[string]int
@@ -225,6 +226,17 @@ func (n *Node) SetEffort(path, value string) {
 		n.effort = map[string]string{}
 	}
 	n.effort[path] = value
+}
+
+// SetStreamTrailer makes a streamed answer end with one more trailer, as a
+// node the mesh should not trust might send.
+func (n *Node) SetStreamTrailer(name, value string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.streamTrailer == nil {
+		n.streamTrailer = http.Header{}
+	}
+	n.streamTrailer.Set(name, value)
 }
 
 // SimulatesCancelled is how many simulations stopped because their client went.
@@ -396,6 +408,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	case p == "/v2/transactions/simulate" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/query" && (n.opts.Simulate == nil || n.opts.Simulate.Query.MaxCalls == 0):
 		writeJSON(w, 404, map[string]string{"message": "Not Found"})
+	case p == "/v2/query" && r.Method == "POST" && n.streaming(w, r):
 	case p == "/v2/query" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/capabilities" && r.Method == "GET":
 		l := n.opts.Simulate
@@ -414,6 +427,15 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 				"max-call-log-bytes": q.MaxCallLogBytes, "max-call-state-bytes": q.MaxCallStateBytes, "max-response-bytes": q.MaxResponseBytes, "max-rounds": q.MaxRounds}
 			if q.MaxTotalCalls > 0 { // unset: a node from before max-total-calls
 				query["max-total-calls"] = q.MaxTotalCalls
+			}
+			if q.Opcodes != 0 || q.Stream { // unset: a node from before time travel inside a call
+				query["max-seek-rounds"], query["max-scan-step-bytes"], query["max-call-scan-bytes"] = q.MaxSeekRounds, q.MaxScanStepBytes, q.MaxCallScanBytes
+			}
+			if q.Opcodes != 0 {
+				query["opcodes"] = q.Opcodes.Names()
+			}
+			if q.Stream {
+				query["stream"] = []string{"sse"}
 			}
 			reply["query"] = query
 		}
@@ -515,6 +537,63 @@ func (n *Node) refusingReads(w http.ResponseWriter, r *http.Request) bool {
 	}
 	writeJSON(w, 400, map[string]string{"message": "simulate no longer takes " + strings.Join(set, ", ") +
 		": use POST /v2/query for read-only calls at several rounds, in isolation or under another protocol"})
+	return true
+}
+
+// streaming answers a query that accepts text/event-stream, on a node that
+// streams, as dtalgorand does: Server-Sent Events from a start event sent at
+// once to an end event, the query running for SetSimulate's delay between
+// them, and the effort SetEffort sets in a trailer. False leaves the answer
+// to the others: a node without streams, another request, or a SetSimulate
+// status, which dtalgorand sends before a stream starts.
+func (n *Node) streaming(w http.ResponseWriter, r *http.Request) bool {
+	n.mu.Lock()
+	delay, status, extra := n.simDelay, n.simStatus, n.streamTrailer.Clone()
+	n.mu.Unlock()
+	if !n.opts.Simulate.Query.Stream || status != 0 || !domain.AcceptsEventStream(r.Header.Values("Accept")) {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, r.Body)
+	h := w.Header()
+	effort := h.Get("X-Algod-Effort")
+	if effort != "" {
+		h.Del("X-Algod-Effort")
+		h.Add("Trailer", "X-Algod-Effort")
+	}
+	for k := range extra {
+		h.Add("Trailer", k)
+	}
+	h.Set("Content-Type", domain.EventStreamType)
+	h.Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	n.mu.Lock()
+	round := n.round
+	n.mu.Unlock()
+	fl := http.NewResponseController(w)
+	fmt.Fprintf(w, "event: start\ndata: {\"last-round\":%d,\"rounds\":[]}\n\n", round)
+	_ = fl.Flush()
+	select {
+	case <-time.After(delay):
+	case <-r.Context().Done():
+		n.mu.Lock()
+		n.simCancelled++
+		n.mu.Unlock()
+		return true
+	}
+	fmt.Fprintf(w, "event: log\ndata: {\"r\":%d,\"c\":0,\"i\":0,\"d\":[\"AQ==\"]}\n\n", round)
+	fmt.Fprintf(w, "event: call\ndata: {\"r\":%d,\"c\":0,\"logs\":1,\"cost\":1}\n\n", round)
+	fmt.Fprintf(w, "event: round\ndata: {\"r\":%d}\n\n", round)
+	end := []byte("{}") // dtalgorand leaves out an effort it does not send
+	if effort != "" {
+		end, _ = json.Marshal(map[string]string{"effort": effort})
+	}
+	fmt.Fprintf(w, "event: end\ndata: %s\n\n", end)
+	if effort != "" {
+		h.Set("X-Algod-Effort", effort)
+	}
+	for k, vs := range extra {
+		h[k] = vs
+	}
 	return true
 }
 

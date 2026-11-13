@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/d13co/algod-mesh/internal/ports"
@@ -90,6 +91,17 @@ func (f *Forwarder) Forward(w http.ResponseWriter, r *http.Request, t ports.Targ
 				}
 				resp.Body.Close()
 				return upstreamRejected{resp.StatusCode}
+			}
+			if t.OnTrailer != nil {
+				// The proxy announces the trailers resp.Trailer holds now
+				// and copies those it holds once the body is closed. With
+				// the map empty, none is announced; the transport fills it
+				// as the body ends, with trailers the node announced or
+				// not, OnTrailer takes what it wants, and the proxy copies
+				// the rest as trailers never announced, which HTTP/1.1
+				// chunked answers allow.
+				resp.Trailer = http.Header{}
+				resp.Body = &trailerBody{ReadCloser: resp.Body, resp: resp, fn: t.OnTrailer}
 			}
 			return nil
 		},
@@ -183,6 +195,21 @@ func IsTimeout(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "context canceled")
+}
+
+// trailerBody hands the trailers of an answer to fn once its body is
+// closed, which the proxy does before it copies them.
+type trailerBody struct {
+	io.ReadCloser
+	resp *http.Response
+	fn   func(http.Header)
+	once sync.Once
+}
+
+func (b *trailerBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { b.fn(b.resp.Trailer) })
+	return err
 }
 
 type trackingWriter struct {
