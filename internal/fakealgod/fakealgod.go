@@ -39,7 +39,8 @@ type Options struct {
 	// is a 404. With ReadsRemoved it is a dtalgorand without simulate's read
 	// extensions: its capabilities have no max-rounds or
 	// resource-limit-multiplier, and a JSON simulate request that sets one
-	// of the removed fields gets its 400.
+	// of the removed fields gets its 400. With StateChanges.Served and
+	// TimeTravel it serves GET /v2/deltas/{round}/txn/state-changes.
 	Simulate *domain.SimulateLimits
 }
 
@@ -420,6 +421,9 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		if !l.ReadsRemoved {
 			sim["max-rounds"], sim["resource-limit-multiplier"] = l.MaxRounds, l.ResourceLimitMultiplier
 		}
+		if l.StateChangeAppID {
+			sim["exec-trace-config"] = []string{"state-change-app-id"}
+		}
 		reply := map[string]any{"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI,
 			"time-limit-seconds": l.TimeLimitSeconds, "simulate": sim}
 		if q := l.Query; q.MaxCalls > 0 {
@@ -439,7 +443,16 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 			}
 			reply["query"] = query
 		}
+		if n.servesStateChanges() {
+			include := l.StateChanges.Include.Names()
+			if include == nil {
+				include = []string{}
+			}
+			reply["state-changes"] = map[string]any{"max-response-bytes": l.StateChanges.MaxResponseBytes, "include": include}
+		}
 		writeJSON(w, 200, reply)
+	case seg(0) == "v2" && seg(1) == "deltas" && seg(3) == "txn" && seg(4) == "state-changes" && len(segs) == 5:
+		n.stateChanges(w, r, seg(2), round)
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
 		tx, ok := n.pool[seg(3)]
@@ -489,6 +502,51 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 200, map[string]any{"node": n.opts.ID, "path": p, "method": r.Method, "round": round})
 	}
+}
+
+// servesStateChanges reports whether the node serves GET
+// /v2/deltas/{round}/txn/state-changes.
+func (n *Node) servesStateChanges() bool {
+	return n.opts.TimeTravel && n.opts.Simulate != nil && n.opts.Simulate.StateChanges.Served
+}
+
+// stateChanges answers GET /v2/deltas/{round}/txn/state-changes as
+// dtalgorand does: 404 without the route, 400 for an include value it does
+// not take, and 404 for a round its history does not hold.
+func (n *Node) stateChanges(w http.ResponseWriter, r *http.Request, rs string, latest uint64) {
+	if !n.servesStateChanges() || r.Method != "GET" {
+		writeJSON(w, 404, map[string]string{"message": "Not Found"})
+		return
+	}
+	rnd, err := strconv.ParseUint(rs, 10, 64)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"message": "bad round"})
+		return
+	}
+	includes := r.URL.Query()["include"]
+	if len(includes) > 1 {
+		// dtalgorand takes include as one comma-separated value.
+		writeJSON(w, 400, map[string]string{"message": "Invalid format for parameter include: expected one value"})
+		return
+	}
+	for _, v := range includes {
+		for _, inc := range strings.Split(v, ",") {
+			if inc == "trace" && !n.opts.DeveloperAPI {
+				writeJSON(w, 400, map[string]string{"message": "include=trace needs node config EnableDeveloperAPI, as simulate's execution traces do"})
+				return
+			}
+			if domain.ParseStateChangesInclude([]string{inc}) == 0 || !n.opts.Simulate.StateChanges.Include.Has(domain.ParseStateChangesInclude([]string{inc})) {
+				writeJSON(w, 400, map[string]string{"message": fmt.Sprintf("include takes %s, comma-separated: %q",
+					strings.Join(n.opts.Simulate.StateChanges.Include.Names(), ", "), inc)})
+				return
+			}
+		}
+	}
+	if rnd > latest {
+		writeJSON(w, 404, map[string]string{"message": fmt.Sprintf("failed retrieving State Delta: round %d is not in the history", rnd)})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"round": rnd, "txns": []any{}, "node": n.opts.ID})
 }
 
 // removedSimulateFields are the simulate request fields a dtalgorand

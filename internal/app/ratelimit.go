@@ -241,6 +241,8 @@ func (l *Limiter) Admit(id Identity, class domain.RequestClass, best uint64) (*T
 		capped = plan.Simulate.Check(*class.SimNeeds)
 	case class.Query && class.QueryNeeds != nil:
 		capped = plan.Query.Check(*class.QueryNeeds)
+	case class.StateChanges:
+		capped = plan.Simulate.CheckStateChanges(class.StateChangesInclude)
 	}
 	if capped != "" {
 		l.metric.Inc("mesh_ratelimited", "plan", plan.Name, "class", costKey, "reason", "cap")

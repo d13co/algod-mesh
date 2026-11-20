@@ -157,11 +157,19 @@ type SimulateLimits struct {
 	// TimeLimitSeconds caps one request's run time (504, or per-round errors
 	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
 	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
+	// StateChangeAppID is a node that takes simulate's exec-trace-config
+	// option state-change-app-id (the capabilities response's
+	// simulate.exec-trace-config lists it). Stock algod refuses the option.
+	StateChangeAppID bool `json:"state_change_app_id,omitempty" yaml:"state_change_app_id,omitempty"`
 	// Query is what the node allows in a POST /v2/query request, the
 	// capabilities response's query object. The zero value is a node without the
 	// endpoint: a stock algod, a dtalgorand from before it, or one with
 	// MaxAPIQueryCalls 0.
 	Query QueryLimits `json:"query,omitzero" yaml:"query,omitempty"`
+	// StateChanges is what the node serves of GET
+	// /v2/deltas/{round}/txn/state-changes, the capabilities response's
+	// state-changes object; the zero value is a node without the route.
+	StateChanges StateChangesLimits `json:"state_changes,omitzero" yaml:"state_changes,omitempty"`
 }
 
 // QueryLimits is what a dtalgorand node allows in one POST /v2/query

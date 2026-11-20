@@ -13,9 +13,9 @@ import (
 func u64(v uint64) *uint64 { return &v }
 
 func TestClassify(t *testing.T) {
-	notFound := Reply{404, "failed to retrieve information from the ledger"}
-	tooHigh := Reply{500, "given round is greater than the latest round"}
-	versionsAhead := Reply{400, "given round is greater than the latest round"}
+	notFound := Reply{Status: 404, Message: "failed to retrieve information from the ledger"}
+	tooHigh := Reply{Status: 500, Message: "given round is greater than the latest round"}
+	versionsAhead := Reply{Status: 400, Message: "given round is greater than the latest round"}
 	cases := []struct {
 		method, path, query string
 		want                RequestClass
@@ -26,7 +26,7 @@ func TestClassify(t *testing.T) {
 		{method: "GET", path: "/v2/blocks/123", query: "header-only=true", want: RequestClass{Round: u64(123), Ahead: notFound, HistoryAnyRound: true, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/lightheader/proof", want: RequestClass{Round: u64(123), Ahead: tooHigh, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/transactions/TXID/proof", want: RequestClass{Round: u64(123),
-			Ahead: Reply{500, "failed to retrieve information from the ledger"}, Idempotent: true}},
+			Ahead: Reply{Status: 500, Message: "failed to retrieve information from the ledger"}, Idempotent: true}},
 		{method: "GET", path: "/v2/deltas/55", want: RequestClass{Round: u64(55), Ahead: notFound, RoundWindow: WindowDelta, Deltas: true, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/txids", want: RequestClass{Round: u64(123), Ahead: notFound, Idempotent: true}},
 		{method: "GET", path: "/v2/blocks/123/lightheader", want: RequestClass{Round: u64(123), Idempotent: true}},
@@ -35,6 +35,12 @@ func TestClassify(t *testing.T) {
 		{method: "POST", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9)}},
 		{method: "GET", path: "/v2/deltas/55/txn/group", want: RequestClass{Round: u64(55), Idempotent: true}},
 		{method: "GET", path: "/v2/deltas/txn/group/abc", want: RequestClass{Idempotent: true}},
+		{method: "GET", path: "/v2/deltas/55/txn/state-changes", want: RequestClass{Round: u64(55), StateChanges: true, TimeTravel: true,
+			Ahead: Reply{Status: 404, Message: "failed retrieving State Delta: round 55 is not in the history"}, Idempotent: true}},
+		{method: "GET", path: "/v2/deltas/55/txn/state-changes", query: "include=budget,trace&include=bogus&txid=X", want: RequestClass{Round: u64(55),
+			StateChanges: true, TimeTravel: true, StateChangesInclude: IncludeBudget | IncludeTrace,
+			Ahead: Reply{Status: 404, Message: "failed retrieving State Delta: round 55 is not in the history"}, Idempotent: true}},
+		{method: "POST", path: "/v2/deltas/55/txn/state-changes", want: RequestClass{Round: u64(55)}},
 		{method: "GET", path: "/v2/stateproofs/9", want: RequestClass{Round: u64(9), Ahead: tooHigh, Idempotent: true}},
 		{method: "GET", path: "/v2/status/wait-for-block-after/70", want: RequestClass{WaitAfter: u64(70), Idempotent: true}},
 		{method: "POST", path: "/v2/teal/compile", want: RequestClass{NeedsDev: true, Idempotent: true}},

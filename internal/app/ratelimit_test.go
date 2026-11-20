@@ -209,6 +209,22 @@ func TestRateLimitSimulateCaps(t *testing.T) {
 	}
 }
 
+// A plan that denies exec-trace-config denies state changes with
+// include=trace too, which return simulate's traces.
+func TestRateLimitStateChangesTrace(t *testing.T) {
+	free := domain.Plan{Minute: perMinute(100), Simulate: domain.SimulateCaps{DenyExecTrace: true}}
+	f := newLimitedFleet(t, free, domain.Plan{}, 0)
+	rec := f.call("GET", "/v2/deltas/5/txn/state-changes?include=budget,trace&txid=X", "", clientA, "")
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "include=trace") {
+		t.Fatalf("trace: %d %s", rec.Code, rec.Body.String())
+	}
+	// No node serves state changes here: the fleet's 404, not the plan's 403.
+	rec = f.call("GET", "/v2/deltas/5/txn/state-changes?include=budget", "", clientA, "")
+	if rec.Code != 404 {
+		t.Fatalf("budget: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A simulation is metered while it runs; once what it ran up overdraws its
 // client, it is cancelled, the node sees the client go, and the client gets
 // 429. It is not run again elsewhere, and the node is not blamed.

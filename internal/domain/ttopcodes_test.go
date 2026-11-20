@@ -140,7 +140,9 @@ func TestHeartbeatFitsDatagram(t *testing.T) {
 	l := SimulateLimits{MaxTxnGroups: 256, MaxRounds: 256, MaxExtraOpcodeBudget: maxExtraOpcodeBudget, ResourceLimitMultiplier: 1024, ReadsRemoved: true,
 		TimeLimitSeconds: 1 << 20, Query: QueryLimits{MaxCalls: 1 << 20, MaxCallBudget: maxExtraOpcodeBudget, MaxCallLogBytes: 1 << 30,
 			MaxCallStateBytes: 1 << 40, MaxResponseBytes: 1 << 40, MaxRounds: 256, MaxTotalCalls: 1 << 28, MaxSeekRounds: 1 << 20,
-			MaxScanStepBytes: 1 << 40, MaxCallScanBytes: 1 << 40, Opcodes: ParseTTOpcodes(TTOpcodes(1<<len(ttOpcodes) - 1).Names()), Stream: true}}
+			MaxScanStepBytes: 1 << 40, MaxCallScanBytes: 1 << 40, Opcodes: ParseTTOpcodes(TTOpcodes(1<<len(ttOpcodes) - 1).Names()), Stream: true},
+		StateChangeAppID: true, StateChanges: StateChangesLimits{Served: true, MaxResponseBytes: 1 << 40,
+			Include: ParseStateChangesInclude(stateChangesIncludes)}}
 	hb := Heartbeat{NodeID: strings.Repeat("n", 32), Seq: 1 << 62, LastRound: 1 << 40, Online: true, Draining: true, Caps: Capabilities{OldestRound: 1 << 40,
 		Archival: Archival{Kind: ArchivalTrailing, N: 1 << 40}, DeveloperAPI: true, FollowMode: true, ExperimentalAPI: true, TimeTravel: true,
 		HoldersIndex: true, HistoryUntrusted: true, TTRoundHeader: true, Simulate: &l, AlgodVersion: "5.10.10.stable",
@@ -150,6 +152,7 @@ func TestHeartbeatFitsDatagram(t *testing.T) {
 	if err != nil || len(wire) > 1400 {
 		t.Fatalf("heartbeat of %d bytes: %v", len(wire), err)
 	}
+	t.Logf("heartbeat of %d bytes", len(wire))
 	got, _, err := DecodeHeartbeat(wire)
 	if err != nil || *got.Caps.Simulate != l {
 		t.Fatalf("decoded %+v: %v", got.Caps.Simulate, err)

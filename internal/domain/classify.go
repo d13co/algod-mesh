@@ -96,6 +96,15 @@ type RequestClass struct {
 	// Deltas marks GET /v2/deltas/{round}, which a time-travel node
 	// re-evaluates from its history for a round past its lookback.
 	Deltas bool
+	// StateChanges marks GET /v2/deltas/{round}/txn/state-changes,
+	// dtalgorand's state changes of each transaction of a round, which a
+	// time-travel node always re-evaluates: from the stored block, against
+	// its history at the round before. Only a node whose capabilities
+	// report the route serves it.
+	StateChanges bool
+	// StateChangesInclude is the include values a state-changes request
+	// asks for that this mesh knows; the node must take every one.
+	StateChangesInclude StateChangesInclude
 	// Holders marks GET /v2/assets/{asset-id}/holders, an asset's holders
 	// at a round, which only a node with TimeTravelHoldersIndex answers.
 	Holders bool
@@ -133,7 +142,8 @@ func (ss Slots) With(s Slot) Slots { return ss | 1<<s }
 // Slot reports the kind of slot the request takes, SlotNone for most.
 func (c RequestClass) Slot() Slot {
 	switch {
-	case c.Evaluates() || c.Deltas:
+	case c.Evaluates() || c.Deltas || c.StateChanges:
+		// State changes share the re-evaluation slots of state deltas.
 		return SlotHeavy
 	case c.Holders:
 		return SlotHolders
@@ -184,6 +194,9 @@ type SimulateNeeds struct {
 	// allow-unnamed-resources: options a rate-limit plan may deny.
 	ExecTrace        bool
 	UnnamedResources bool
+	// StateAppID marks exec-trace-config's state-change-app-id, which only
+	// a dtalgorand that lists it takes; stock algod refuses it.
+	StateAppID bool
 }
 
 // Fits reports whether a node with capabilities c accepts the request.
@@ -195,6 +208,9 @@ func (n SimulateNeeds) Fits(c Capabilities) bool {
 		return false
 	}
 	l := c.SimulateLimits()
+	if n.StateAppID && !l.StateChangeAppID {
+		return false
+	}
 	return uint64(n.Groups) <= l.MaxTxnGroups && uint64(n.Rounds) <= l.MaxRounds && n.ExtraOpcodeBudget <= l.MaxExtraOpcodeBudget
 }
 
@@ -206,7 +222,8 @@ type SimulateBody struct {
 	Rounds            []uint64   `codec:"rounds" json:"rounds"`
 	ExtraOpcodeBudget int64      `codec:"extra-opcode-budget" json:"extra-opcode-budget"`
 	ExecTraceConfig   struct {
-		Enable bool `codec:"enable" json:"enable"`
+		Enable           bool `codec:"enable" json:"enable"`
+		StateChangeAppID bool `codec:"state-change-app-id" json:"state-change-app-id"`
 	} `codec:"exec-trace-config" json:"exec-trace-config"`
 	AllowUnnamedResources bool   `codec:"allow-unnamed-resources" json:"allow-unnamed-resources"`
 	ParallelGroups        bool   `codec:"parallel-groups" json:"parallel-groups"`
@@ -228,7 +245,8 @@ func (c *RequestClass) ApplySimulate(b SimulateBody) {
 	n := SimulateNeeds{Groups: len(b.TxnGroups), Rounds: len(b.Rounds),
 		Fork:         b.ParallelGroups || b.SkipValidityWindow || b.RewriteValidityWindow || b.Protocol != "",
 		DeveloperAPI: b.ExecTraceConfig.Enable || b.Protocol == protocolFuture,
-		ExecTrace:    b.ExecTraceConfig.Enable, UnnamedResources: b.AllowUnnamedResources}
+		ExecTrace:    b.ExecTraceConfig.Enable, UnnamedResources: b.AllowUnnamedResources,
+		StateAppID: b.ExecTraceConfig.StateChangeAppID}
 	if b.ExtraOpcodeBudget > 0 {
 		n.ExtraOpcodeBudget = uint64(b.ExtraOpcodeBudget)
 	}
@@ -242,6 +260,8 @@ func (c *RequestClass) ApplySimulate(b SimulateBody) {
 		// With rounds as well the node rejects the request; routing it by
 		// round gets that answer from a node that would otherwise serve it.
 		setRound(b.Round)
+		// dtalgorand refuses a round past its latest as a request error.
+		c.Ahead = Reply{Status: 400, Message: fmt.Sprintf("round %d is after the latest round %%d", b.Round), Latest: true}
 	case len(b.Rounds) > 0:
 		var lo, hi uint64
 		for _, r := range b.Rounds {
@@ -346,9 +366,19 @@ func (c *RequestClass) ApplyQuery(b QueryBody) {
 // A query drops its rounds the same way, then its limits, so that a node
 // with queries says what it does not allow, and last its need for queries
 // at all, so that algod answers 404 as it does alone.
+//
+// A state-changes request drops the include values it asks for, so that a
+// node with the route answers with its own 400 for one it does not take.
 func (c RequestClass) Relaxed() []RequestClass {
 	if c.Query {
 		return c.relaxedQuery()
+	}
+	if c.StateChanges {
+		if c.StateChangesInclude == 0 {
+			return nil
+		}
+		c.StateChangesInclude = 0
+		return []RequestClass{c}
 	}
 	if c.SimNeeds == nil {
 		return nil
@@ -387,6 +417,17 @@ func (c RequestClass) relaxedQuery() []RequestClass {
 type Reply struct {
 	Status  int
 	Message string
+	// Latest marks Message as a format that takes the latest round, which
+	// algod names in some refusals: the latest the fleet has reached.
+	Latest bool
+}
+
+// Text is the reply's message, latest being the fleet's latest round.
+func (r Reply) Text(latest uint64) string {
+	if r.Latest {
+		return fmt.Sprintf(r.Message, latest)
+	}
+	return r.Message
 }
 
 // HighestRound is the latest round the request names, Round or RoundHigh;
@@ -428,6 +469,12 @@ func (c RequestClass) String() string {
 	if c.Deltas {
 		parts = append(parts, "deltas")
 	}
+	if c.StateChanges {
+		parts = append(parts, "state_changes")
+		if c.StateChangesInclude != 0 {
+			parts = append(parts, "include="+strings.Join(c.StateChangesInclude.Names(), "+"))
+		}
+	}
 	if c.Holders {
 		parts = append(parts, "holders")
 	}
@@ -464,6 +511,9 @@ func (c RequestClass) String() string {
 		if n.DeveloperAPI {
 			parts = append(parts, "sim_dev")
 		}
+		if n.StateAppID {
+			parts = append(parts, "sim_state_app_id")
+		}
 	}
 	if c.Query {
 		parts = append(parts, "query")
@@ -498,6 +548,9 @@ func (c RequestClass) String() string {
 // StatKey buckets requests for per-class latency tracking.
 func (c RequestClass) StatKey() string {
 	switch {
+	case c.StateChanges:
+		// A round re-evaluated, which takes far longer than a history read.
+		return CostStateChanges
 	case c.TimeTravel:
 		// A history read, whether ?round= or /versions, is its own bucket.
 		return "timetravel"
@@ -591,7 +644,7 @@ func Classify(method, path, rawQuery string) RequestClass {
 		if method == "GET" {
 			if hi, ok := versionsHigh(q); ok {
 				c.RoundHigh = hi
-				c.Ahead = Reply{400, "given round is greater than the latest round"}
+				c.Ahead = Reply{Status: 400, Message: "given round is greater than the latest round"}
 			} else if n, ok := versionsDescNext(q); ok {
 				// A node behind next answers 200 from its latest round
 				// down, skipping the versions in between: there is no
@@ -612,12 +665,12 @@ func Classify(method, path, rawQuery string) RequestClass {
 			case method != "GET":
 				// algod has no such route; Ahead stays unset.
 			case seg(1) == "stateproofs" && sub == "", seg(1) == "blocks" && sub == "lightheader/proof":
-				c.Ahead = Reply{500, "given round is greater than the latest round"}
+				c.Ahead = Reply{Status: 500, Message: "given round is greater than the latest round"}
 			case seg(1) == "blocks" && len(segs) == 6 && seg(3) == "transactions" && seg(5) == "proof":
-				c.Ahead = Reply{500, ledger}
+				c.Ahead = Reply{Status: 500, Message: ledger}
 			case seg(1) == "blocks" && (sub == "" || sub == "hash" || sub == "txids" || sub == "logs"),
 				seg(1) == "deltas" && sub == "":
-				c.Ahead = Reply{404, ledger}
+				c.Ahead = Reply{Status: 404, Message: ledger}
 			}
 			if seg(1) == "deltas" && sub == "" {
 				// A plain node serves a delta only from its account-state
@@ -625,6 +678,15 @@ func Classify(method, path, rawQuery string) RequestClass {
 				// is still stored, so it stays on the block window.
 				c.RoundWindow = WindowDelta
 				c.Deltas = method == "GET"
+			}
+			if seg(1) == "deltas" && sub == "txn/state-changes" && method == "GET" {
+				// dtalgorand re-evaluates the stored block against its
+				// history at the round before, at every round: a node with
+				// the history, within its block window. Other methods have
+				// no route anywhere.
+				c.StateChanges, c.TimeTravel = true, true
+				c.StateChangesInclude = stateChangesIncludeParam(q)
+				c.Ahead = Reply{Status: 404, Message: stateChangesNotInHistory(r)}
 			}
 		}
 		if seg(1) == "blocks" && q.Get("header-only") == "true" {

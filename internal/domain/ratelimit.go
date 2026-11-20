@@ -129,23 +129,34 @@ func (c SimulateCaps) Check(n SimulateNeeds) string {
 	return ""
 }
 
+// CheckStateChanges returns why a state-changes request asking for include
+// is beyond the caps, or "" when it is within them. include=trace returns
+// simulate's execution traces, which DenyExecTrace denies.
+func (c SimulateCaps) CheckStateChanges(include StateChangesInclude) string {
+	if c.DenyExecTrace && include.Has(IncludeTrace) {
+		return "this plan does not allow include=trace"
+	}
+	return ""
+}
+
 // The cost keys: what a request is billed as before it runs. They are the
 // stat keys (StatKey), with three heavy kinds of time-travel request split out.
 const (
 	CostVersions      = "versions"       // an object history page
 	CostDeltasHistory = "deltas_history" // a state delta re-evaluated from the history
+	CostStateChanges  = "state_changes"  // a round's state changes, re-evaluated from the history
 	CostHolders       = "holders"        // a page of an asset's holders
 )
 
 // CostKeys lists every key a CostWeights may set.
-var CostKeys = []string{"default", "round", "timetravel", "simulate", "query", "broadcast", "pending", "wait", "teal", CostVersions, CostDeltasHistory, CostHolders}
+var CostKeys = []string{"default", "round", "timetravel", "simulate", "query", "broadcast", "pending", "wait", "teal", CostVersions, CostDeltasHistory, CostStateChanges, CostHolders}
 
 // DefaultCostWeights is what each kind of request costs unless configured.
 //
 // TODO(review): the query weight (0.25 per call and round) is a placeholder,
 // not measured. Set it from benchmarks of POST /v2/query against simulate.
 var DefaultCostWeights = CostWeights{"default": 1, "round": 1, "timetravel": 2, "simulate": 5, "query": 0.25, "broadcast": 1,
-	"pending": 1, "wait": 1, "teal": 1, CostVersions: 10, CostDeltasHistory: 50, CostHolders: 10}
+	"pending": 1, "wait": 1, "teal": 1, CostVersions: 10, CostDeltasHistory: 50, CostStateChanges: 50, CostHolders: 10}
 
 // recentDeltaRounds is how far behind the best round a state delta is still
 // served from the node's own lookback (MaxAcctLookback, 4 by default) rather
