@@ -1042,6 +1042,27 @@ func (d *Directory) peerRoundLocked(p *peerState, now time.Time) (uint64, bool) 
 	return 0, false
 }
 
+// Upstream finds the upstream named id for a pinned request: its address,
+// token and tier, without judging its state, which a pinned request must not
+// touch. n counts the upstreams with that id: the config keeps the local node
+// and the externals apart, but a peer may call itself after either.
+func (d *Directory) Upstream(id string) (u domain.Upstream, n int) {
+	if !d.opts.NoLocal && id == d.opts.LocalID {
+		local := d.monitor.State()
+		u, n = domain.Upstream{ID: id, Kind: domain.KindLocal, Tier: d.opts.LocalTier, BaseURL: local.Endpoint, Token: local.Config.Token}, 1
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if p, ok := d.peers[id]; ok {
+		u, n = domain.Upstream{ID: id, Kind: domain.KindPeer, Tier: p.rec.Tier, Token: p.rec.Token,
+			BaseURL: domain.EndpointFor(p.rec.Endpoints, p.hosts, p.ln.curAddr())}, n+1
+	}
+	if e, ok := d.externals[id]; ok {
+		u, n = domain.Upstream{ID: id, Kind: domain.KindExternal, Tier: e.cfg.Tier, BaseURL: e.cfg.URL, Token: e.cfg.Token}, n+1
+	}
+	return u, n
+}
+
 // Snapshot builds the candidate list for one routing decision.
 func (d *Directory) Snapshot() ([]domain.Upstream, uint64) {
 	local := d.monitor.State()

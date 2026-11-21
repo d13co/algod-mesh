@@ -548,7 +548,7 @@ func TestCORSLikeAlgod(t *testing.T) {
 	check("preflight", do("OPTIONS", "/v2/transactions", "https://x.example", ""), 204, http.Header{
 		"Access-Control-Allow-Origin":  {"*"},
 		"Access-Control-Allow-Methods": {"GET,POST,PUT,DELETE,OPTIONS"},
-		"Access-Control-Allow-Headers": {"X-Algo-API-Token,Content-Type"},
+		"Access-Control-Allow-Headers": {"X-Algo-API-Token,Content-Type,X-Algod-Mesh-Upstream"}, // algod's, plus the mesh's pin header
 		"Vary":                         {"Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"},
 	})
 	// Not held as a wait-for-block request would be.

@@ -732,11 +732,21 @@ func (c *Config) Finish() error {
 	if c.Mesh.PathTimeout == 0 {
 		c.Mesh.PathTimeout = 2 * time.Second
 	}
+	externals := map[string]bool{}
 	for i := range c.Tiers.External {
 		e := &c.Tiers.External[i]
 		if e.Name == "" || e.URL == "" {
 			return fmt.Errorf("tiers.external[%d]: name and url are required", i)
 		}
+		// The name is the upstream's id, in the response header, routing.exclude
+		// and the pin header: it must name one upstream.
+		switch {
+		case externals[e.Name]:
+			return fmt.Errorf("tiers.external[%d]: name %q is used twice", i, e.Name)
+		case e.Name == c.Local.ID:
+			return fmt.Errorf("tiers.external[%d]: name %q is this agent's own id (local.id)", i, e.Name)
+		}
+		externals[e.Name] = true
 		if e.HealthCheck < 0 {
 			return fmt.Errorf("tiers.external[%d]: health_check must not be negative", i)
 		}
