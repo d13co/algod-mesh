@@ -186,7 +186,7 @@ func TestEligibleSimulateReads(t *testing.T) {
 		if !Eligible(old, c, 100, 2) {
 			t.Errorf("%+v: not eligible on an older dtalgorand", b)
 		}
-		if CouldServe([]Upstream{nw}, c) || !CouldServe([]Upstream{nw, old}, c) {
+		if CouldServe([]Upstream{nw}, c, 0) || !CouldServe([]Upstream{nw, old}, c, 0) {
 			t.Errorf("%+v: CouldServe counts the wrong nodes", b)
 		}
 		// Rounds still need max-rounds; the options only an older node.
@@ -402,13 +402,13 @@ func TestCouldServe(t *testing.T) {
 	down := Upstream{Health: HealthOffline, Draining: true, LastRound: 100, Stats: Stats{BreakerOpen: true}, Caps: Capabilities{Simulate: &dtLimits}}
 	stock := Upstream{Health: HealthSynced, LastRound: 100}
 	two := simClass(SimulateBody{TxnGroups: make([]struct{}, 2)})
-	if Eligible(down, two, 100, 2) || !CouldServe([]Upstream{stock, down}, two) {
+	if Eligible(down, two, 100, 2) || !CouldServe([]Upstream{stock, down}, two, 0) {
 		t.Fatal("a fitting node that is out must count as able to serve")
 	}
-	if CouldServe([]Upstream{stock}, two) {
+	if CouldServe([]Upstream{stock}, two, 0) {
 		t.Fatal("a stock node cannot serve two groups")
 	}
-	if CouldServe([]Upstream{down}, simClass(SimulateBody{Rounds: []uint64{5000}})) {
+	if CouldServe([]Upstream{down}, simClass(SimulateBody{Rounds: []uint64{5000}}), 0) {
 		t.Fatal("a node whose last round is short of the rounds cannot serve them")
 	}
 }

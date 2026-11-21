@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -207,7 +208,7 @@ func TestFleetQueryLimits(t *testing.T) {
 	got, _ = FleetCapabilities(us, 100, 2, 0)
 	want := FleetQueryLimits{MaxCalls: 1024, MaxCallBudget: 320000, MaxCallLogBytes: 65536, MaxCallStateBytes: 64 << 20, MaxResponseBytes: 64 << 20, MaxRounds: 16,
 		MaxTotalCalls: 1024}
-	if got.Query == nil || *got.Query != want {
+	if got.Query == nil || !reflect.DeepEqual(*got.Query, want) {
 		t.Fatalf("query limits %+v, want %+v (one node's, the most calls)", got.Query, want)
 	}
 	us[3].Health = HealthOffline

@@ -157,11 +157,19 @@ type SimulateLimits struct {
 	// TimeLimitSeconds caps one request's run time (504, or per-round errors
 	// for a rounds list); 0 is no limit, or a dtalgorand from before it.
 	TimeLimitSeconds uint64 `json:"time_limit_seconds,omitempty" yaml:"time_limit_seconds,omitempty"`
+	// StateChangeAppID is a node that takes simulate's exec-trace-config
+	// option state-change-app-id (the capabilities response's
+	// simulate.exec-trace-config lists it). Stock algod refuses the option.
+	StateChangeAppID bool `json:"state_change_app_id,omitempty" yaml:"state_change_app_id,omitempty"`
 	// Query is what the node allows in a POST /v2/query request, the
 	// capabilities response's query object. The zero value is a node without the
 	// endpoint: a stock algod, a dtalgorand from before it, or one with
 	// MaxAPIQueryCalls 0.
 	Query QueryLimits `json:"query,omitzero" yaml:"query,omitempty"`
+	// StateChanges is what the node serves of GET
+	// /v2/deltas/{round}/txn/state-changes, the capabilities response's
+	// state-changes object; the zero value is a node without the route.
+	StateChanges StateChangesLimits `json:"state_changes,omitzero" yaml:"state_changes,omitempty"`
 }
 
 // QueryLimits is what a dtalgorand node allows in one POST /v2/query
@@ -179,6 +187,20 @@ type QueryLimits struct {
 	// duplicates counted). 0 is max_calls × max_rounds: a node from before
 	// the field, or an override that does not set it.
 	MaxTotalCalls uint64 `json:"max_total_calls,omitempty" yaml:"max_total_calls,omitempty"`
+	// MaxSeekRounds is the most rounds one call may move its reads to with
+	// tt_seek; 0: time travel inside a call is off, or a node from before it.
+	MaxSeekRounds uint64 `json:"max_seek_rounds,omitempty" yaml:"max_seek_rounds,omitempty"`
+	// MaxScanStepBytes and MaxCallScanBytes bound the history one search of
+	// a state key or box name prefix, and all of a call's searches, may read.
+	MaxScanStepBytes uint64 `json:"max_scan_step_bytes,omitempty" yaml:"max_scan_step_bytes,omitempty"`
+	MaxCallScanBytes uint64 `json:"max_call_scan_bytes,omitempty" yaml:"max_call_scan_bytes,omitempty"`
+	// Opcodes are the time-travel opcodes the node runs in query programs,
+	// the capabilities response's opcodes list as a set: a heartbeat
+	// carries a word where the names would take a fifth of a datagram.
+	Opcodes TTOpcodes `json:"tt_opcodes,omitempty" yaml:"tt_opcodes,omitempty"`
+	// Stream is a node that answers a query that accepts text/event-stream
+	// with Server-Sent Events (stream lists "sse"); without it, in full.
+	Stream bool `json:"sse,omitempty" yaml:"sse,omitempty"`
 }
 
 // StockMaxExtraOpcodeBudget is the extra opcode budget limit of stock algod

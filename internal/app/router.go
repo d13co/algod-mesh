@@ -167,6 +167,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	sw := &statusWriter{ResponseWriter: w, origin: req.Header.Get("Origin") != ""}
 	// A closure, so the log sees the class as refineBody leaves it.
 	defer func() { r.logRequest(sw, req, class, start) }()
+	if class.Query {
+		class.EventStream = domain.AcceptsEventStream(req.Header.Values("Accept"))
+	}
 	if class.Evaluates() && !r.refineBody(req, &class) {
 		writeMessage(sw, http.StatusBadRequest, "algod-mesh: cannot read request body")
 		return
@@ -558,13 +561,23 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 	ctx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
 	defer cancel()
 	release := r.stats.Begin(u.ID)
+	// Also when the forwarder panics with http.ErrAbortHandler, as it does
+	// when an answer is cut while copied: a client that leaves a stream.
+	defer release()
 	target := ports.Target{BaseURL: u.BaseURL, Token: u.Token, RetryStatus: retry}
-	timeLimited := class.Evaluates() || class.Deltas || class.Versions || class.Holders
+	timeLimited := class.Evaluates() || class.Deltas || class.StateChanges || class.Versions || class.Holders
 	if timeLimited {
 		target.PassStatus = timeLimitPass
 	}
 	if t, ok := ctx.Value(ticketKey{}).(*Ticket); ok {
-		target.OnResponse = r.effortReader(t, u)
+		effort := r.effortReader(t, u)
+		target.OnResponse = func(_ int, h http.Header) { effort(h) }
+		target.OnTrailer = func(h http.Header) {
+			// The cost trailer is the mesh's own (Ticket.Done): one a node
+			// sends would go out ahead of it.
+			h.Del(costHeader)
+			effort(h)
+		}
 	}
 	switch {
 	case class.Boxes && class.Round != nil && u.ServesHistory():
@@ -573,6 +586,13 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		// another node answers it.
 		target.Check = func(status int, _ http.Header, msg string) bool {
 			return !boxesRoundGone(class, ports.Outcome{Status: status, Message: msg})
+		}
+	case class.StateChanges && class.Round != nil && u.ServesHistory() && *class.Round <= u.LastRound:
+		// State changes at a round the node has reached are refused with a
+		// 404 when its history is untrusted: withheld, so that another
+		// node answers them.
+		target.Check = func(status int, _ http.Header, msg string) bool {
+			return !stateChangesRoundGone(class, ports.Outcome{Status: status, Message: msg})
 		}
 	case class.RoundMarked && class.TimeTravel && u.Caps.TTRoundHeader:
 		// The node marks what it answers at a round; an answer without the
@@ -589,6 +609,12 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 		// The client left, or its allowance ran out: nothing about the upstream.
 	case timeLimited && out.Status == http.StatusGatewayTimeout:
 		// dtalgorand's time limit on one request, not a failing node.
+	case u.Kind == domain.KindExternal && stateChangesRoundGone(class, out):
+		// An external's round comes from a probe, and it may answer from a
+		// backend behind the one probed: its refusal of a round it should
+		// have reached says nothing of its history. Withheld all the same,
+		// and held against nothing.
+		r.metric.Inc("mesh_upstream_round_missing", "upstream", u.ID)
 	case historyUntrusted(class, out):
 		// The node's history differs from the chain: it answers nothing at a
 		// past round until its store is replaced, and the rest as before.
@@ -646,12 +672,14 @@ func (r *Router) forward(ctx context.Context, w http.ResponseWriter, req *http.R
 }
 
 // effortReader takes the work a node reports doing off its answer to a
-// billed client, and bills it to the client's ticket. Only mesh nodes are
-// believed: an external could bill clients anything. The client sees the
-// cost in credits, not the node's figures; an exempt client (the admin)
-// sees them as the node sent them.
-func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(int, http.Header) {
-	return func(_ int, h http.Header) {
+// billed client, its headers or, for a streamed query, which reports it
+// once the stream ends, its trailers, and bills it to the client's ticket.
+// Only mesh nodes are believed: an external could bill clients anything.
+// The client sees the cost in credits, not the node's figures; an exempt
+// client (the admin) sees them as the node sent them. A stream's end event
+// repeats the figures in its body, which the mesh passes as it is.
+func (r *Router) effortReader(t *Ticket, u domain.Upstream) func(http.Header) {
+	return func(h http.Header) {
 		vs := h.Values(domain.EffortHeader)
 		if len(vs) == 0 {
 			return
@@ -713,11 +741,22 @@ const holdersMissingFor = time.Minute
 
 // historyUntrusted reports dtalgorand's answer to a request at a round, a
 // history page or a holders page while its time-travel history is found to
-// differ from the chain: a 503 with ErrHistoryUntrusted's message, or the
-// 400 a box listing gets for a round outside the node's memory.
+// differ from the chain: a 503 with ErrHistoryUntrusted's message, the 400 a
+// box listing gets for a round outside the node's memory, or the 404 state
+// changes get for a round the node has reached.
 func historyUntrusted(class domain.RequestClass, out ports.Outcome) bool {
 	return out.Status == http.StatusServiceUnavailable && strings.Contains(out.Message, historyNotServed) ||
-		boxesRoundGone(class, out)
+		boxesRoundGone(class, out) || stateChangesRoundGone(class, out)
+}
+
+// stateChangesRoundGone reports dtalgorand's answer to state changes at a
+// round its history does not hold, which for a round the node has reached
+// means the history is untrusted. Only such a request to a node that
+// serves its history is checked for it (see forward), and out.Message is set
+// only for an answer withheld from the client.
+func stateChangesRoundGone(class domain.RequestClass, out ports.Outcome) bool {
+	return class.StateChanges && class.Round != nil && out.Status == http.StatusNotFound &&
+		domain.StateChangesNotInHistory(out.Message, *class.Round)
 }
 
 // historyNotServed is in dtalgorand's message for ErrHistoryUntrusted.
@@ -814,6 +853,12 @@ func (r *Router) noUpstream(w http.ResponseWriter, class domain.RequestClass, ca
 	timeTravel := func(c domain.Capabilities) bool { return c.TimeTravel }
 	if class.Holders && fleetLacks(cands, holders) {
 		writeMessage(w, 400, noHoldersIndexMessage)
+		return
+	}
+	stateChanges := func(c domain.Capabilities) bool { return c.StateChanges().Served }
+	if class.StateChanges && fleetLacks(cands, stateChanges) {
+		// A node without the route answers echo's 404.
+		writeMessage(w, 404, noStateChangesMessage)
 		return
 	}
 	if class.TimeTravel && fleetLacks(cands, timeTravel) {
@@ -1025,6 +1070,7 @@ const (
 	noTimeTravelMessage   = "algod-mesh: looking up past rounds requires EnableTimeTravel, and no node in the fleet has it"
 	noVersionsMessage     = "algod-mesh: the versions endpoints require EnableTimeTravel, and no node in the fleet has it"
 	noHoldersIndexMessage = "algod-mesh: asset holders require EnableTimeTravel and TimeTravelHoldersIndex, and no node in the fleet has them"
+	noStateChangesMessage = "algod-mesh: the state changes endpoint requires EnableTimeTravel, and no node in the fleet serves it"
 )
 
 func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *http.Request, class domain.RequestClass, cands []domain.Upstream, best uint64) {
@@ -1038,14 +1084,17 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 		// the strict class.
 		prev := class
 		for _, rc := range class.Relaxed() {
-			if domain.CouldServe(cands, prev) {
+			if domain.CouldServe(cands, prev, r.opts.SyncTolerance) {
 				break
 			}
 			prev = rc
 			if sel, ok = r.sel(cands, rc, best); ok {
-				if class.Query {
+				switch {
+				case class.Query:
 					r.metric.Inc("mesh_query_relaxed")
-				} else {
+				case class.StateChanges:
+					r.metric.Inc("mesh_state_changes_relaxed")
+				default:
 					r.metric.Inc("mesh_simulate_relaxed")
 				}
 				r.log.Debug("no upstream fits the request, relaxed", "class", class.String(), "relaxed", rc.String())
@@ -1063,7 +1112,7 @@ func (r *Router) handleDefault(ctx context.Context, w http.ResponseWriter, req *
 		// may count an external whose check has since expired, so the
 		// candidates are measured instead; 0 means nothing is reachable.
 		if top := aheadTop(cands, class); class.Ahead.Status != 0 && top > 0 && class.HighestRound() > top {
-			writeMessage(w, class.Ahead.Status, class.Ahead.Message)
+			writeMessage(w, class.Ahead.Status, class.Ahead.Text(top))
 			return
 		}
 		r.noUpstream(w, class, cands, best)
@@ -1185,9 +1234,10 @@ func (r *Router) forwardSelected(ctx context.Context, w http.ResponseWriter, req
 			answerQuotaExceeded(ctx, w)
 			return
 		}
-		if class.Evaluates() && errors.Is(last.Err, context.DeadlineExceeded) {
-			// A simulation or query that ran out of time would only run as long on
-			// the next node, for nothing: the client gets the timeout.
+		if (class.Evaluates() || class.StateChanges) && errors.Is(last.Err, context.DeadlineExceeded) {
+			// A simulation, query or round's state changes that ran out of
+			// time would only run as long on the next node, for nothing: the
+			// client gets the timeout.
 			r.answerFailure(w, req, class, last)
 			return
 		}

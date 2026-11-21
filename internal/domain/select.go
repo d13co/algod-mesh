@@ -83,58 +83,43 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 	if len(elig) == 0 {
 		return Selection{}, false
 	}
-	// A time-travel node is the tie-breaker against a peer sitting on the
-	// edge of its state window: its LastRound comes from a heartbeat that can
-	// trail the node by a round, so the round may already be unservable
-	// there, while history answers it exactly.
-	hasTT := false
+	// Preferences eligibility leaves out, since every eligible node serves
+	// the request, order the nodes within a tier (see rank).
+	var p preferences
 	for _, u := range elig {
-		if u.ServesHistory() {
-			hasTT = true
-			break
-		}
+		p.tt = p.tt || u.ServesHistory()
+		p.stream = p.stream || u.Caps.QueryLimits().Stream
 	}
-	// Order: effective tier, then the edge preference, then score. Ties
-	// broken by ID for determinism.
+	rank := make(map[string]int, len(elig))
+	for _, u := range elig {
+		rank[u.ID] = p.rank(u, c)
+	}
+	// Order: effective tier, then rank, then score. Ties broken by ID for
+	// determinism.
 	sort.SliceStable(elig, func(i, j int) bool {
 		ti, tj := effectiveTier(mode, elig[i]), effectiveTier(mode, elig[j])
 		if ti != tj {
 			return ti < tj
 		}
-		if hasTT {
-			ei, ej := stateWindowEdge(elig[i], c), stateWindowEdge(elig[j], c)
-			if ei != ej {
-				return ej // a peer on the edge sorts after a time-travel node
-			}
+		if ri, rj := rank[elig[i].ID], rank[elig[j].ID]; ri != rj {
+			return ri < rj
 		}
 		if elig[i].Score != elig[j].Score {
 			return elig[i].Score < elig[j].Score
 		}
 		return elig[i].ID < elig[j].ID
 	})
-	top := effectiveTier(mode, elig[0])
+	// The pool is the top tier's best rank, so that power-of-two-choices
+	// cannot fall on a node another one is preferred to.
+	top, best := effectiveTier(mode, elig[0]), rank[elig[0].ID]
 	n := 0
-	for n < len(elig) && effectiveTier(mode, elig[n]) == top {
+	for n < len(elig) && effectiveTier(mode, elig[n]) == top && rank[elig[n].ID] == best {
 		n++
 	}
 	idx := 0
 	if mode == ModeLoadBalancer && n > 1 && rnd != nil {
-		// Keep an edge peer out of the random pool when a time-travel node is
-		// eligible, so power-of-two-choices cannot fall on the risky peer.
-		pool := make([]int, 0, n)
-		for i := 0; i < n; i++ {
-			if hasTT && stateWindowEdge(elig[i], c) {
-				continue
-			}
-			pool = append(pool, i)
-		}
-		if len(pool) == 0 {
-			for i := 0; i < n; i++ {
-				pool = append(pool, i)
-			}
-		}
-		a := pool[rnd.IntN(len(pool))]
-		b := pool[rnd.IntN(len(pool))]
+		a := rnd.IntN(n)
+		b := rnd.IntN(n)
 		if elig[b].Score < elig[a].Score {
 			a = b
 		}
@@ -145,6 +130,33 @@ func Select(mode Mode, cands []Upstream, c RequestClass, bestRound, tolerance ui
 	alts = append(alts, elig[:idx]...)
 	alts = append(alts, elig[idx+1:]...)
 	return Selection{Chosen: chosen, Alternates: alts, Tier: chosen.Tier}, true
+}
+
+// preferences are what the eligible nodes offer that a request may prefer.
+type preferences struct {
+	tt     bool // a node serves its time-travel history
+	stream bool // a node streams query answers
+}
+
+// rank is how far u is from the node c prefers, 0 for none: a sum of the
+// preferences it misses, the largest weighing more than the rest together.
+// Each counts only when another eligible node meets it:
+//
+//   - a query that accepts text/event-stream prefers a node that streams the
+//     answer to one that sends it whole;
+//   - a time-travel node is the tie-breaker against a peer sitting on the
+//     edge of its state window: its LastRound comes from a heartbeat that can
+//     trail the node by a round, so the round may already be unservable
+//     there, while history answers it exactly.
+func (p preferences) rank(u Upstream, c RequestClass) int {
+	r := 0
+	if p.stream && c.EventStream && !u.Caps.QueryLimits().Stream {
+		r += 2
+	}
+	if p.tt && stateWindowEdge(u, c) {
+		r++
+	}
+	return r
 }
 
 // stateWindowEdge reports whether u is a non-local, non-time-travel node whose

@@ -3,6 +3,9 @@ package algodhttp
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +91,55 @@ func TestClientAgainstFakeAlgod(t *testing.T) {
 	defer do.Close()
 	if lim, err := New(do.URL(), do.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != older {
 		t.Fatalf("query limits without max-total-calls: %v %+v", err, lim)
+	}
+	timeTravel := withQuery
+	timeTravel.Query.MaxSeekRounds, timeTravel.Query.MaxScanStepBytes, timeTravel.Query.MaxCallScanBytes = 64, 4<<20, 64<<20
+	timeTravel.Query.Opcodes, timeTravel.Query.Stream = domain.ParseTTOpcodes([]string{"tt_seek", "tt_box_change", "tt_box_prefix_change"}), true
+	dtt := fakealgod.New(fakealgod.Options{ID: "dtt", StartRound: 5, Simulate: &timeTravel, TimeTravel: true})
+	defer dtt.Close()
+	if lim, err := New(dtt.URL(), dtt.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != timeTravel {
+		t.Fatalf("query limits with time-travel opcodes and streams: %v %+v", err, lim)
+	}
+	// dtalgorand's own answer; an opcode this mesh does not know is left out.
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"time-travel":true,"developer-api":false,"time-limit-seconds":59,"simulate":{"max-txn-groups":16,"max-extra-opcode-budget":320000},` +
+			`"query":{"max-calls":1024,"max-call-budget":320000,"max-call-log-bytes":65536,"max-call-scan-bytes":67108864,"max-call-state-bytes":67108864,` +
+			`"max-response-bytes":67108864,"max-rounds":16,"max-scan-step-bytes":4194304,"max-seek-rounds":64,"max-total-calls":1024,` +
+			`"opcodes":["tt_seek","tt_acct_change","tt_someday"],"stream":["sse","ws"]}}`))
+	}))
+	defer raw.Close()
+	lim, err := New(raw.URL, "t", nil).Capabilities(ctx)
+	if err != nil || lim == nil {
+		t.Fatalf("raw capabilities: %v", err)
+	}
+	if q := lim.Limits.Query; q.MaxSeekRounds != 64 || q.MaxScanStepBytes != 4<<20 || q.MaxCallScanBytes != 64<<20 || !q.Stream ||
+		strings.Join(q.Opcodes.Names(), ",") != "tt_seek,tt_acct_change" {
+		t.Fatalf("raw query limits %+v", q)
+	}
+	// dtalgorand's state-changes object and exec-trace-config options; an
+	// include value or option this mesh does not know is left out.
+	rawSC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"time-travel":true,"developer-api":true,"time-limit-seconds":59,` +
+			`"simulate":{"max-txn-groups":16,"max-extra-opcode-budget":320000,"exec-trace-config":["state-change-app-id","someday"]},` +
+			`"state-changes":{"max-response-bytes":16777216,"include":["accounts","assets","apps","budget","reads","trace","someday"]}}`))
+	}))
+	defer rawSC.Close()
+	lim, err = New(rawSC.URL, "t", nil).Capabilities(ctx)
+	if err != nil || lim == nil {
+		t.Fatalf("raw state-changes capabilities: %v", err)
+	}
+	if sc := lim.Limits.StateChanges; !sc.Served || sc.MaxResponseBytes != 16<<20 ||
+		strings.Join(sc.Include.Names(), ",") != "accounts,assets,apps,budget,reads,trace" || !lim.Limits.StateChangeAppID {
+		t.Fatalf("raw state-changes %+v, app id %v", sc, lim.Limits.StateChangeAppID)
+	}
+	// The fake node reports what it is given.
+	withSC := want
+	withSC.StateChangeAppID = true
+	withSC.StateChanges = domain.StateChangesLimits{Served: true, MaxResponseBytes: 1 << 20, Include: domain.IncludeAccounts | domain.IncludeReads}
+	dsc := fakealgod.New(fakealgod.Options{ID: "dsc", StartRound: 5, Simulate: &withSC, TimeTravel: true})
+	defer dsc.Close()
+	if lim, err := New(dsc.URL(), dsc.Token(), nil).Capabilities(ctx); err != nil || lim == nil || lim.Limits != withSC {
+		t.Fatalf("state-changes capabilities: %v %+v", err, lim)
 	}
 	bad := New(n.URL(), "wrong", nil)
 	if _, err := bad.Status(ctx); err == nil {

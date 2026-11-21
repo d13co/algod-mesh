@@ -33,6 +33,11 @@ func Eligible(u Upstream, c RequestClass, bestRound, tolerance uint64) bool {
 	if c.Holders && (!u.Caps.HoldersIndex || u.Stats.HoldersMissing) {
 		return false
 	}
+	if c.StateChanges {
+		if sc := u.Caps.StateChanges(); !sc.Served || !sc.Include.Has(c.StateChangesInclude) {
+			return false
+		}
+	}
 	if c.RoundHigh > u.LastRound {
 		return false
 	}
@@ -166,12 +171,18 @@ func BestRound(us []Upstream) uint64 {
 
 // CouldServe reports whether some upstream has what class c needs, whatever
 // its state: reachable or not, draining, breaker open, lagging. Its last
-// known round still has to cover the rounds c names. The router relaxes a
-// simulate request only when nothing could serve it, not while the nodes
-// that could are briefly out, which a client should hear as a 503 and retry.
-func CouldServe(us []Upstream, c RequestClass) bool {
+// known round has to cover the rounds c names, or fall short of the latest
+// by at most tolerance: a node that soon reaches it is only briefly out. The
+// router relaxes a request only when nothing could serve it, not while the
+// nodes that could are briefly out, which a client should hear as a 503 and
+// retry rather than as another node's refusal of what it asked for.
+func CouldServe(us []Upstream, c RequestClass, tolerance uint64) bool {
+	hi := c.HighestRound()
 	for _, u := range us {
 		u.Health, u.Draining, u.Stats = HealthSynced, false, Stats{}
+		if hi > u.LastRound && hi-u.LastRound <= tolerance {
+			u.LastRound = hi
+		}
 		if Eligible(u, c, u.LastRound, 0) {
 			return true
 		}
@@ -189,6 +200,16 @@ type FleetCapabilitiesReply struct {
 	// Query is what a POST /v2/query sent to the mesh may ask for; absent
 	// when no eligible node has queries.
 	Query *FleetQueryLimits `json:"query,omitempty"`
+	// StateChanges is what GET /v2/deltas/{round}/txn/state-changes sent to
+	// the mesh may ask for; absent when no eligible node serves it.
+	StateChanges *FleetStateChangesLimits `json:"state-changes,omitempty"`
+}
+
+// FleetStateChangesLimits is the capabilities response's state-changes
+// object, in dtalgorand's own form.
+type FleetStateChangesLimits struct {
+	MaxResponseBytes uint64   `json:"max-response-bytes"`
+	Include          []string `json:"include"`
 }
 
 // FleetSimulateLimits is the capabilities response's simulate object, in
@@ -201,7 +222,14 @@ type FleetSimulateLimits struct {
 	MaxRounds               *uint64 `json:"max-rounds,omitempty"`
 	MaxExtraOpcodeBudget    uint64  `json:"max-extra-opcode-budget"`
 	ResourceLimitMultiplier *uint64 `json:"resource-limit-multiplier,omitempty"`
+	// ExecTraceConfig lists the fork's exec-trace-config options the node
+	// takes; absent when none, as a node without them leaves it out.
+	ExecTraceConfig []string `json:"exec-trace-config,omitempty"`
 }
+
+// stateChangeAppIDOption is the exec-trace-config option that adds the app
+// id to each state change of an execution trace.
+const stateChangeAppIDOption = "state-change-app-id"
 
 // FleetQueryLimits is the capabilities response's query object, in
 // dtalgorand's own form.
@@ -212,7 +240,13 @@ type FleetQueryLimits struct {
 	MaxCallStateBytes uint64 `json:"max-call-state-bytes"`
 	MaxResponseBytes  uint64 `json:"max-response-bytes"`
 	MaxRounds         uint64 `json:"max-rounds"`
+	MaxSeekRounds     uint64 `json:"max-seek-rounds"`
+	MaxScanStepBytes  uint64 `json:"max-scan-step-bytes"`
+	MaxCallScanBytes  uint64 `json:"max-call-scan-bytes"`
 	MaxTotalCalls     uint64 `json:"max-total-calls"`
+	// Opcodes and Stream are absent when empty, as a node leaves them out.
+	Opcodes []string `json:"opcodes,omitempty"`
+	Stream  []string `json:"stream,omitempty"`
 }
 
 // FleetCapabilities is GET /v2/capabilities answered for the fleet. Its
@@ -222,8 +256,9 @@ type FleetQueryLimits struct {
 // combined across nodes could promise a request no single node runs (many
 // groups from one, many rounds from another). The node is the one whose
 // limits are largest, compared in order: groups, rounds, extra opcode budget,
-// simulate's read extensions, time travel, developer API, then its id for a
-// stable answer. A node whose limits are all at least another's always wins.
+// simulate's read extensions, state-change-app-id, time travel, developer
+// API, then its id for a stable answer. A node whose limits are all at least
+// another's always wins.
 // The resource limit multiplier is the smallest of every eligible node
 // instead, stock ones and those without the read extensions (the consensus
 // limits) counting as 1: no request asks for it, so the router may send a
@@ -258,20 +293,39 @@ type FleetQueryLimits struct {
 // limits, compared in order: calls, rounds, call budget, time travel, then
 // its id. It is picked apart from the simulate limits, as a query is routed
 // apart from a simulation.
+//
+// Its time-travel opcodes and their limits come with it: the router does
+// not route by opcodes, taking every node with queries to have them. stream
+// lists "sse" when any eligible node streams: the router prefers such a node
+// for a request that accepts a stream, and any other answers it in full,
+// which such a client reads too.
+//
+// The state-changes object is that of the eligible node that takes the
+// most include values, then answers the largest, then its id, picked apart
+// as the query object is. The simulate object's exec-trace-config is its
+// node's, which the order prefers to take state-change-app-id.
 func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeout time.Duration) (FleetCapabilitiesReply, bool) {
-	var best, bestQuery *Upstream
+	var best, bestQuery, bestStateChanges *Upstream
+	var stream bool
 	var multiplier, timeLimit uint64
 	var timeTravel, developerAPI bool
 	plain := RequestClass{Simulate: true, Idempotent: true}
 	query := RequestClass{Query: true, Idempotent: true}
+	stateChanges := RequestClass{StateChanges: true, TimeTravel: true, Idempotent: true}
 	for i := range us {
 		u := &us[i]
 		if c, ok := u.KnownCaps(); ok && !u.Excluded {
 			timeTravel = timeTravel || c.TimeTravel
 			developerAPI = developerAPI || c.DeveloperAPI
 		}
-		if Eligible(*u, query, bestRound, tolerance) && (bestQuery == nil || queryLimitsAbove(*u, *bestQuery)) {
-			bestQuery = u
+		if Eligible(*u, query, bestRound, tolerance) {
+			if bestQuery == nil || queryLimitsAbove(*u, *bestQuery) {
+				bestQuery = u
+			}
+			stream = stream || u.Caps.QueryLimits().Stream
+		}
+		if Eligible(*u, stateChanges, bestRound, tolerance) && (bestStateChanges == nil || stateChangesAbove(*u, *bestStateChanges)) {
+			bestStateChanges = u
 		}
 		if !Eligible(*u, plain, bestRound, tolerance) {
 			continue
@@ -304,10 +358,25 @@ func FleetCapabilities(us []Upstream, bestRound, tolerance uint64, upstreamTimeo
 	if best.Caps.SimulateReads() {
 		reply.Simulate.MaxRounds, reply.Simulate.ResourceLimitMultiplier = &l.MaxRounds, &multiplier
 	}
+	if l.StateChangeAppID {
+		reply.Simulate.ExecTraceConfig = []string{stateChangeAppIDOption}
+	}
+	if bestStateChanges != nil {
+		sc := bestStateChanges.Caps.StateChanges()
+		include := sc.Include.Names()
+		if include == nil {
+			include = []string{}
+		}
+		reply.StateChanges = &FleetStateChangesLimits{MaxResponseBytes: sc.MaxResponseBytes, Include: include}
+	}
 	if bestQuery != nil {
 		q := bestQuery.Caps.QueryLimits()
 		reply.Query = &FleetQueryLimits{MaxCalls: q.MaxCalls, MaxCallBudget: q.MaxCallBudget, MaxCallLogBytes: q.MaxCallLogBytes,
-			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls}
+			MaxCallStateBytes: q.MaxCallStateBytes, MaxResponseBytes: q.MaxResponseBytes, MaxRounds: q.MaxRounds, MaxTotalCalls: q.MaxTotalCalls,
+			MaxSeekRounds: q.MaxSeekRounds, MaxScanStepBytes: q.MaxScanStepBytes, MaxCallScanBytes: q.MaxCallScanBytes, Opcodes: q.Opcodes.Names()}
+		if stream {
+			reply.Query.Stream = []string{"sse"}
+		}
 	}
 	return reply, true
 }
@@ -343,6 +412,8 @@ func simulateLimitsAbove(a, b Upstream) bool {
 		return la.MaxExtraOpcodeBudget > lb.MaxExtraOpcodeBudget
 	case a.Caps.SimulateReads() != b.Caps.SimulateReads():
 		return a.Caps.SimulateReads()
+	case la.StateChangeAppID != lb.StateChangeAppID:
+		return la.StateChangeAppID
 	case a.ServesHistory() != b.ServesHistory():
 		return a.ServesHistory()
 	case a.Caps.DeveloperAPI != b.Caps.DeveloperAPI:

@@ -628,6 +628,12 @@ func fmtLimits(l *domain.SimulateLimits, err error) string {
 	if q := l.Query; q.MaxCalls > 0 {
 		s += fmt.Sprintf(" query_calls=%d query_rounds=%d query_total_calls=%d query_budget=%d", q.MaxCalls, q.MaxRounds,
 			domain.Capabilities{Simulate: l}.QueryLimits().MaxTotalCalls, q.MaxCallBudget)
+		if q.Opcodes != 0 {
+			s += fmt.Sprintf(" query_opcodes=%d query_seek_rounds=%d", q.Opcodes.Len(), q.MaxSeekRounds)
+		}
+		if q.Stream {
+			s += " query_stream"
+		}
 	}
 	return s
 }

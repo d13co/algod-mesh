@@ -39,7 +39,8 @@ type Options struct {
 	// is a 404. With ReadsRemoved it is a dtalgorand without simulate's read
 	// extensions: its capabilities have no max-rounds or
 	// resource-limit-multiplier, and a JSON simulate request that sets one
-	// of the removed fields gets its 400.
+	// of the removed fields gets its 400. With StateChanges.Served and
+	// TimeTravel it serves GET /v2/deltas/{round}/txn/state-changes.
 	Simulate *domain.SimulateLimits
 }
 
@@ -74,6 +75,7 @@ type Node struct {
 	pathRetry     map[string]int    // ... with this Retry-After, in seconds
 	pathMessage   map[string]string // ... and this message
 	effort        map[string]string // answers for these paths carry this X-Algod-Effort
+	streamTrailer http.Header       // further trailers a streamed answer sends
 	boxes         map[uint64]map[string][]byte
 	pool          map[string]poolTxn
 	hits          map[string]int
@@ -225,6 +227,17 @@ func (n *Node) SetEffort(path, value string) {
 		n.effort = map[string]string{}
 	}
 	n.effort[path] = value
+}
+
+// SetStreamTrailer makes a streamed answer end with one more trailer, as a
+// node the mesh should not trust might send.
+func (n *Node) SetStreamTrailer(name, value string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.streamTrailer == nil {
+		n.streamTrailer = http.Header{}
+	}
+	n.streamTrailer.Set(name, value)
 }
 
 // SimulatesCancelled is how many simulations stopped because their client went.
@@ -396,6 +409,7 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	case p == "/v2/transactions/simulate" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/query" && (n.opts.Simulate == nil || n.opts.Simulate.Query.MaxCalls == 0):
 		writeJSON(w, 404, map[string]string{"message": "Not Found"})
+	case p == "/v2/query" && r.Method == "POST" && n.streaming(w, r):
 	case p == "/v2/query" && r.Method == "POST" && n.simulating(w, r):
 	case p == "/v2/capabilities" && r.Method == "GET":
 		l := n.opts.Simulate
@@ -407,6 +421,9 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 		if !l.ReadsRemoved {
 			sim["max-rounds"], sim["resource-limit-multiplier"] = l.MaxRounds, l.ResourceLimitMultiplier
 		}
+		if l.StateChangeAppID {
+			sim["exec-trace-config"] = []string{"state-change-app-id"}
+		}
 		reply := map[string]any{"time-travel": n.opts.TimeTravel, "developer-api": n.opts.DeveloperAPI,
 			"time-limit-seconds": l.TimeLimitSeconds, "simulate": sim}
 		if q := l.Query; q.MaxCalls > 0 {
@@ -415,9 +432,27 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 			if q.MaxTotalCalls > 0 { // unset: a node from before max-total-calls
 				query["max-total-calls"] = q.MaxTotalCalls
 			}
+			if q.Opcodes != 0 || q.Stream { // unset: a node from before time travel inside a call
+				query["max-seek-rounds"], query["max-scan-step-bytes"], query["max-call-scan-bytes"] = q.MaxSeekRounds, q.MaxScanStepBytes, q.MaxCallScanBytes
+			}
+			if q.Opcodes != 0 {
+				query["opcodes"] = q.Opcodes.Names()
+			}
+			if q.Stream {
+				query["stream"] = []string{"sse"}
+			}
 			reply["query"] = query
 		}
+		if n.servesStateChanges() {
+			include := l.StateChanges.Include.Names()
+			if include == nil {
+				include = []string{}
+			}
+			reply["state-changes"] = map[string]any{"max-response-bytes": l.StateChanges.MaxResponseBytes, "include": include}
+		}
 		writeJSON(w, 200, reply)
+	case seg(0) == "v2" && seg(1) == "deltas" && seg(3) == "txn" && seg(4) == "state-changes" && len(segs) == 5:
+		n.stateChanges(w, r, seg(2), round)
 	case seg(0) == "v2" && seg(1) == "transactions" && seg(2) == "pending" && seg(3) != "":
 		n.mu.Lock()
 		tx, ok := n.pool[seg(3)]
@@ -469,6 +504,51 @@ func (n *Node) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// servesStateChanges reports whether the node serves GET
+// /v2/deltas/{round}/txn/state-changes.
+func (n *Node) servesStateChanges() bool {
+	return n.opts.TimeTravel && n.opts.Simulate != nil && n.opts.Simulate.StateChanges.Served
+}
+
+// stateChanges answers GET /v2/deltas/{round}/txn/state-changes as
+// dtalgorand does: 404 without the route, 400 for an include value it does
+// not take, and 404 for a round its history does not hold.
+func (n *Node) stateChanges(w http.ResponseWriter, r *http.Request, rs string, latest uint64) {
+	if !n.servesStateChanges() || r.Method != "GET" {
+		writeJSON(w, 404, map[string]string{"message": "Not Found"})
+		return
+	}
+	rnd, err := strconv.ParseUint(rs, 10, 64)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"message": "bad round"})
+		return
+	}
+	includes := r.URL.Query()["include"]
+	if len(includes) > 1 {
+		// dtalgorand takes include as one comma-separated value.
+		writeJSON(w, 400, map[string]string{"message": "Invalid format for parameter include: expected one value"})
+		return
+	}
+	for _, v := range includes {
+		for _, inc := range strings.Split(v, ",") {
+			if inc == "trace" && !n.opts.DeveloperAPI {
+				writeJSON(w, 400, map[string]string{"message": "include=trace needs node config EnableDeveloperAPI, as simulate's execution traces do"})
+				return
+			}
+			if domain.ParseStateChangesInclude([]string{inc}) == 0 || !n.opts.Simulate.StateChanges.Include.Has(domain.ParseStateChangesInclude([]string{inc})) {
+				writeJSON(w, 400, map[string]string{"message": fmt.Sprintf("include takes %s, comma-separated: %q",
+					strings.Join(n.opts.Simulate.StateChanges.Include.Names(), ", "), inc)})
+				return
+			}
+		}
+	}
+	if rnd > latest {
+		writeJSON(w, 404, map[string]string{"message": fmt.Sprintf("failed retrieving State Delta: round %d is not in the history", rnd)})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"round": rnd, "txns": []any{}, "node": n.opts.ID})
+}
+
 // removedSimulateFields are the simulate request fields a dtalgorand
 // without the read extensions refuses, in the order it names them.
 var removedSimulateFields = []string{"rounds", "parallel-groups", "skip-validity-window", "rewrite-validity-window", "protocol"}
@@ -515,6 +595,63 @@ func (n *Node) refusingReads(w http.ResponseWriter, r *http.Request) bool {
 	}
 	writeJSON(w, 400, map[string]string{"message": "simulate no longer takes " + strings.Join(set, ", ") +
 		": use POST /v2/query for read-only calls at several rounds, in isolation or under another protocol"})
+	return true
+}
+
+// streaming answers a query that accepts text/event-stream, on a node that
+// streams, as dtalgorand does: Server-Sent Events from a start event sent at
+// once to an end event, the query running for SetSimulate's delay between
+// them, and the effort SetEffort sets in a trailer. False leaves the answer
+// to the others: a node without streams, another request, or a SetSimulate
+// status, which dtalgorand sends before a stream starts.
+func (n *Node) streaming(w http.ResponseWriter, r *http.Request) bool {
+	n.mu.Lock()
+	delay, status, extra := n.simDelay, n.simStatus, n.streamTrailer.Clone()
+	n.mu.Unlock()
+	if !n.opts.Simulate.Query.Stream || status != 0 || !domain.AcceptsEventStream(r.Header.Values("Accept")) {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, r.Body)
+	h := w.Header()
+	effort := h.Get("X-Algod-Effort")
+	if effort != "" {
+		h.Del("X-Algod-Effort")
+		h.Add("Trailer", "X-Algod-Effort")
+	}
+	for k := range extra {
+		h.Add("Trailer", k)
+	}
+	h.Set("Content-Type", domain.EventStreamType)
+	h.Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	n.mu.Lock()
+	round := n.round
+	n.mu.Unlock()
+	fl := http.NewResponseController(w)
+	fmt.Fprintf(w, "event: start\ndata: {\"last-round\":%d,\"rounds\":[]}\n\n", round)
+	_ = fl.Flush()
+	select {
+	case <-time.After(delay):
+	case <-r.Context().Done():
+		n.mu.Lock()
+		n.simCancelled++
+		n.mu.Unlock()
+		return true
+	}
+	fmt.Fprintf(w, "event: log\ndata: {\"r\":%d,\"c\":0,\"i\":0,\"d\":[\"AQ==\"]}\n\n", round)
+	fmt.Fprintf(w, "event: call\ndata: {\"r\":%d,\"c\":0,\"logs\":1,\"cost\":1}\n\n", round)
+	fmt.Fprintf(w, "event: round\ndata: {\"r\":%d}\n\n", round)
+	end := []byte("{}") // dtalgorand leaves out an effort it does not send
+	if effort != "" {
+		end, _ = json.Marshal(map[string]string{"effort": effort})
+	}
+	fmt.Fprintf(w, "event: end\ndata: %s\n\n", end)
+	if effort != "" {
+		h.Set("X-Algod-Effort", effort)
+	}
+	for k, vs := range extra {
+		h[k] = vs
+	}
 	return true
 }
 

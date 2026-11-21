@@ -51,13 +51,13 @@ func newSimFleetDir(t *testing.T, cCaps domain.Capabilities, o RouterOptions, do
 func newSimPair(t *testing.T, bCaps, cCaps domain.Capabilities, o RouterOptions, do DirectoryOptions, bOpts ...func(*fakealgod.Options)) *simFleet {
 	t.Helper()
 	h := newHarnessWith(t, do, algodhttp.Factory{})
-	bo := fakealgod.Options{ID: "b", StartRound: 100, Simulate: bCaps.Simulate, TimeTravel: bCaps.TimeTravel}
+	bo := fakealgod.Options{ID: "b", StartRound: 100, Simulate: bCaps.Simulate, TimeTravel: bCaps.TimeTravel, DeveloperAPI: bCaps.DeveloperAPI}
 	for _, f := range bOpts {
 		f(&bo)
 	}
 	b := fakealgod.New(bo)
 	t.Cleanup(b.Close)
-	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 100, Simulate: cCaps.Simulate, TimeTravel: cCaps.TimeTravel})
+	c := fakealgod.New(fakealgod.Options{ID: "c", StartRound: 100, Simulate: cCaps.Simulate, TimeTravel: cCaps.TimeTravel, DeveloperAPI: cCaps.DeveloperAPI})
 	t.Cleanup(c.Close)
 	cPub, cKey, _ := ed25519.GenerateKey(crand.Reader)
 	recB := h.peerRecord(addrA)
@@ -155,9 +155,10 @@ func TestSimulateRelaxedWhenNothingFits(t *testing.T) {
 		t.Fatalf("rounds past every node went to %q, want c", up)
 	}
 	// A single round no node holds stays refused: a node without it would
-	// answer the latest state or an error.
+	// answer the latest state or an error. Past every node, it is
+	// dtalgorand's 400 with the fleet's latest round.
 	rec := f.do(http.MethodPost, "/v2/transactions/simulate", strings.NewReader(`{"txn-groups":[],"round":5000}`))
-	if rec.Code != 503 {
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), `"round 5000 is after the latest round 100"`) {
 		t.Fatalf("future round: %d %s", rec.Code, rec.Body.String())
 	}
 }
